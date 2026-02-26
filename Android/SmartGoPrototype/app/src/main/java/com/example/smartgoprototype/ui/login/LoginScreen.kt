@@ -84,14 +84,14 @@ fun LoginScreen(
                     textAlign = TextAlign.Center
                 )
 
-                // username/email
+                // email
                 OutlinedTextField(
                     value = uiState.email,
                     onValueChange = onEmailChanged,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(bottom = 8.dp),
-                    label = { Text("Email or username") },
+                    label = { Text("Email") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Text,

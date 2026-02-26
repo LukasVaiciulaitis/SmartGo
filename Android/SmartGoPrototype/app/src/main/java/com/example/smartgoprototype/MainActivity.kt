@@ -1,5 +1,6 @@
 package com.example.smartgoprototype
 
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -82,9 +83,10 @@ fun SmartGoAppNavHost(
         // Register
         composable(Routes.REGISTER) {
             RegisterRoute(
-                onRegisterSuccess = { username ->
+                onRegisterSuccess = { email ->
                     // After successful sign-up, go to confirmation screen
-                    navController.navigate("${Routes.CONFIRM_SIGN_UP}/$username") {
+                    val encodedEmail = Uri.encode(email)
+                    navController.navigate("${Routes.CONFIRM_SIGN_UP}/$encodedEmail") {
                         //remove REGISTER from back stack
                         popUpTo(Routes.REGISTER) { inclusive = true }
                     }
@@ -97,15 +99,16 @@ fun SmartGoAppNavHost(
 
         // Confirm sign-up
         composable(
-            route = "${Routes.CONFIRM_SIGN_UP}/{username}",
+            route = "${Routes.CONFIRM_SIGN_UP}/{email}",
             arguments = listOf(
-                navArgument("username") { type = NavType.StringType }
+                navArgument("email") { type = NavType.StringType }
             )
         ) { backStackEntry ->
-            val username = backStackEntry.arguments?.getString("username").orEmpty()
+            val email = backStackEntry.arguments?.getString("email").orEmpty()
+            val decodedEmail = Uri.decode(email)
 
             ConfirmSignUpRoute(
-                username = username,
+                email = decodedEmail,
                 onConfirmSuccess = {
                     // On Confirmation navigate to Dashboard
                     navController.navigate(Routes.DASHBOARD) {

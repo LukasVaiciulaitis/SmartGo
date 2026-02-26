@@ -27,13 +27,6 @@ class RegisterViewModel @Inject constructor(
     var uiState by mutableStateOf(RegisterUiState())
         private set
 
-    fun onUsernameChanged(newUsername: String) {
-        uiState = uiState.copy(
-            username = newUsername,
-            usernameError = null,
-            generalError = null
-        ).validate()
-    }
     fun onEmailChanged(newEmail: String) {
         uiState = uiState.copy(
             email = newEmail,
@@ -81,12 +74,11 @@ class RegisterViewModel @Inject constructor(
         )
 
         // Capture current values once so edits during the network call don't change what is submitted.
-        val username = uiState.username
-        val email = uiState.email
+        val email = uiState.email.trim().lowercase()
         val password = uiState.password
 
         viewModelScope.launch {
-            val result = authRepository.register(username, email, password)
+            val result = authRepository.register(email, password)
 
             uiState = result.fold(
                 onSuccess = {
@@ -108,34 +100,25 @@ class RegisterViewModel @Inject constructor(
         }
     }
 
-
     /**
      * Client-side validation for UX (inline errors + enabling/disabling the Register button).
      *
      * TODO: extend validation and comply with backend
      */
     private fun RegisterUiState.validate(): RegisterUiState {
-        val looksLikeEmail = android.util.Patterns.EMAIL_ADDRESS.matcher(username).matches()
-        val isUsernameValid = username.isNotBlank() && !looksLikeEmail
-
         val isEmailValid =
             email.isNotBlank() && android.util.Patterns.EMAIL_ADDRESS.matcher(email).matches()
-        val isPasswordValid = password.length >= 6
+        val isPasswordValid = password.length >= 8
         val isConfirmValid = confirmPassword == password && confirmPassword.isNotBlank()
 
         return copy(
-            usernameError = when {
-                username.isBlank() -> "Username is required"
-                looksLikeEmail -> "Username cannot be an email address"
-                else -> null
-            },
             emailError = if (email.isNotBlank() && !isEmailValid) "Invalid email" else null,
-            passwordError = if (password.isNotBlank() && !isPasswordValid) "At least 6 characters" else null,
+            passwordError = if (password.isNotBlank() && !isPasswordValid) "At least 8 characters" else null,
             confirmPasswordError = when {
                 confirmPassword.isNotBlank() && confirmPassword != password -> "Passwords do not match"
                 else -> null
             },
-            isRegisterEnabled = isUsernameValid && isEmailValid && isPasswordValid && isConfirmValid && !isLoading
+            isRegisterEnabled = isEmailValid && isPasswordValid && isConfirmValid && !isLoading
         )
     }
 }

@@ -11,14 +11,14 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 
 @Composable
 fun ConfirmSignUpRoute(
-    username: String,
+    email: String,
     viewModel: ConfirmSignUpViewModel = hiltViewModel(),
     onConfirmSuccess: () -> Unit = {},
     onBackToLogin: () -> Unit = {}
 ) {
     // Inject username into VM once
-    LaunchedEffect(username) {
-        viewModel.initUsername(username)
+    LaunchedEffect(email) {
+        viewModel.initUsername(email)
     }
 
     val uiState = viewModel.uiState

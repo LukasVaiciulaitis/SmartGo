@@ -45,27 +45,18 @@ class CognitoAuthRepository @Inject constructor() : AuthRepository {
     }
 
     override suspend fun register(
-        username: String,
         email: String,
         password: String
     ): Result<Unit> {
-        // Enforce app-level rules before hitting Cognito:
-        // the prototype treats "username" as a separate identifier, not an email address.
-        val looksLikeEmail =
-            android.util.Patterns.EMAIL_ADDRESS.matcher(username).matches()
-        if (looksLikeEmail) {
-            return Result.failure(
-                IllegalArgumentException("Username cannot be an email address")
-            )
-        }
-
         return suspendCancellableCoroutine { cont ->
+            val normalizedEmail = email.trim().lowercase()
+
             val options = AuthSignUpOptions.builder()
-                .userAttribute(AuthUserAttributeKey.email(), email)
+                .userAttribute(AuthUserAttributeKey.email(), normalizedEmail)
                 .build()
 
             Amplify.Auth.signUp(
-                username,
+                normalizedEmail,
                 password,
                 options,
                 { result ->
@@ -85,12 +76,14 @@ class CognitoAuthRepository @Inject constructor() : AuthRepository {
     }
 
     override suspend fun confirmSignUp(
-        username: String,
+        email: String,
         code: String
     ): Result<Unit> {
         return suspendCancellableCoroutine { cont ->
+            val normalizedEmail = email.trim().lowercase()
+
             Amplify.Auth.confirmSignUp(
-                username,
+                normalizedEmail,
                 code,
                 { result ->
                     if (result.isSignUpComplete) {

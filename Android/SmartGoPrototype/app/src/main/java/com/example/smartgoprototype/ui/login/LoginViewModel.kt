@@ -60,7 +60,7 @@ class LoginViewModel @Inject constructor(
         )
 
         // capture current values to avoid races if user types during call
-        val identifier = uiState.email
+        val identifier = uiState.email.trim().lowercase()
         val password = uiState.password
 
         viewModelScope.launch {
@@ -92,11 +92,16 @@ class LoginViewModel @Inject constructor(
      * This is intentionally lightweight; deeper validation belongs on the backend.
      */
     private fun LoginUiState.validate(): LoginUiState {
-        val isIdentifierValid = email.isNotBlank()
+        val isIdentifierValid =
+            email.isNotBlank() && android.util.Patterns.EMAIL_ADDRESS.matcher(email).matches()
         val isPasswordValid = password.length >= 6
 
         return copy(
-            emailError = if (!isIdentifierValid) "Required" else null,
+            emailError = when {
+                email.isBlank() -> "Required"
+                !isIdentifierValid -> "Invalid email"
+                else -> null
+            },
             passwordError = if (password.isNotBlank() && !isPasswordValid) "At least 6 characters" else null,
             isLoginEnabled = isIdentifierValid && isPasswordValid && !isLoading
         )

@@ -29,13 +29,12 @@ fun RegisterRoute(
 
     LaunchedEffect(uiState.isRegisterSuccessful) {
         if (uiState.isRegisterSuccessful) {
-            onRegisterSuccess(uiState.username)
+            onRegisterSuccess(uiState.email.trim().lowercase())
         }
     }
 
     RegisterScreen(
         uiState = uiState,
-        onUsernameChanged = viewModel::onUsernameChanged,
         onEmailChanged = viewModel::onEmailChanged,
         onPasswordChanged = viewModel::onPasswordChanged,
         onConfirmPasswordChanged = viewModel::onConfirmPasswordChanged,
@@ -53,7 +52,6 @@ fun RegisterRoute(
 @Composable
 fun RegisterScreen(
     uiState: RegisterUiState,
-    onUsernameChanged: (String) -> Unit,
     onEmailChanged: (String) -> Unit,
     onPasswordChanged: (String) -> Unit,
     onConfirmPasswordChanged: (String) -> Unit,
@@ -87,31 +85,6 @@ fun RegisterScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 32.dp),
                     textAlign = TextAlign.Center
-                )
-
-                // Username
-                OutlinedTextField(
-                    value = uiState.username,
-                    onValueChange = onUsernameChanged,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 8.dp),
-                    label = { Text("Username") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Text,
-                        imeAction = ImeAction.Next
-                    ),
-                    isError = uiState.usernameError != null,
-                    supportingText = {
-                        uiState.usernameError?.let {
-                            Text(
-                                text = it,
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                    }
                 )
 
                 // Email

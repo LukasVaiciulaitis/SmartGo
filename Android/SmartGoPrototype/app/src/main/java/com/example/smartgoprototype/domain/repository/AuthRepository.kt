@@ -9,6 +9,6 @@ package com.example.smartgoprototype.domain.repository
  */
 interface AuthRepository {
     suspend fun login(identifier: String, password: String): Result<Unit>
-    suspend fun register(username: String, email: String, password: String): Result<Unit>
-    suspend fun confirmSignUp(username: String, code: String): Result<Unit>
+    suspend fun register(email: String, password: String): Result<Unit>
+    suspend fun confirmSignUp(email: String, code: String): Result<Unit>
 }

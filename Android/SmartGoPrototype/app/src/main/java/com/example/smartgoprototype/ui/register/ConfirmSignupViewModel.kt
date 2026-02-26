@@ -29,7 +29,7 @@ class ConfirmSignUpViewModel @Inject constructor(
      */
     fun initUsername(username: String) {
         if (uiState.username.isBlank()) {
-            uiState = uiState.copy(username = username)
+            uiState = uiState.copy(username = username.trim().lowercase())
         }
     }
 
