@@ -1,0 +1,598 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Serverless route advisory stack — REST API Gateway with Cognito auth,
+  4 route CRUD Lambdas, 3 batch Lambdas, and 3 DynamoDB tables.
+
+Parameters:
+  TicketmasterApiKey:
+    Type: String
+    NoEcho: true
+    Description: Ticketmaster Discovery API Consumer Key for eventScraper
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 300
+    MemorySize: 256
+    Layers:
+      - !Ref UtilsLayer
+    Environment:
+      Variables:
+        USER_ROUTE_TABLE: !Ref UserRouteDB
+        DELAYS_TABLE: !Ref DelaysDB
+        LOCATION_DB_TABLE: !Ref LocationDB
+        DELAY_WORKER_QUEUE_URL: !Ref DelayWorkerQueue
+
+Resources:
+
+  # ───────────────────────────────
+  # LAMBDA LAYERS
+  # ───────────────────────────────
+  UtilsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: utils
+      Description: Shared utilities — chunkArray, parseDurationToMinutes, batchGet, batchWrite
+      ContentUri: src/shared/
+      CompatibleRuntimes:
+        - nodejs20.x
+      RetentionPolicy: Delete
+
+  # ───────────────────────────────
+  # COGNITO
+  # ───────────────────────────────
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: routeAppUserPool
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      EmailVerificationMessage: "Your verification code is {####}"
+      EmailVerificationSubject: "Verify your Route App account"
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostConfirmationLambda.Arn
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: routeAppAndroidClient
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+
+  # ───────────────────────────────
+  # IAM
+  # ───────────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: serverless-lambda-execution-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt UserRouteDB.Arn
+                  - !GetAtt DelaysDB.Arn
+                  - !GetAtt LocationDB.Arn
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt DelayWorkerQueue.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt DelayWorkerQueue.Arn
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/routeApp/*
+
+  # ───────────────────────────────
+  # SSM PARAMETERS
+  # ───────────────────────────────
+  TicketmasterApiKeyParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /routeApp/ticketmasterApiKey
+      Type: String
+      Value: !Ref TicketmasterApiKey
+      Description: Ticketmaster Discovery API Consumer Key for eventScraper
+
+  # ───────────────────────────────
+  # SQS — delay worker queue + DLQ
+  # Orchestrator enqueues chunks of 1,000 routes.
+  # Worker Lambdas process one chunk per invocation.
+  # Failed chunks retry up to 3 times then go to DLQ.
+  # ───────────────────────────────
+  DelayWorkerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: delayWorkerDLQ
+      MessageRetentionPeriod: 1209600  # 14 days
+
+  DelayWorkerQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: delayWorkerQueue
+      VisibilityTimeout: 300           # Must be >= Lambda timeout (300s)
+      MessageRetentionPeriod: 86400    # 1 day — messages are nightly only
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DelayWorkerDLQ.Arn
+        maxReceiveCount: 3             # Retry failed chunks 3 times before DLQ
+
+  # ───────────────────────────────
+  # PK: userId (Cognito sub)
+  # SK: recordType
+  #   PROFILE
+  #   ROUTE#<routeId>
+  #   SCHEDULE#<routeId>
+  #   FORECAST#<routeId>        ← day-keyed, no specific dates
+  # TTL enabled on ttl attribute — used for SCHEDULE# auto-expiry
+  # ───────────────────────────────
+  UserRouteDB:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: userRouteDB
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: recordType
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: recordType
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ───────────────────────────────
+  # DYNAMODB — delaysDB
+  # PK: cityKey (IE#DUBLIN)
+  # SK: type#date
+  #   WEATHER#YYYY-MM-DD
+  #   EVENTS#YYYY-MM-DD
+  #   (future: ROADWORKS#, TRANSIT# etc.)
+  # TTL enabled — records auto-expire after 8 days
+  # ───────────────────────────────
+  DelaysDB:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: delaysDB
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: cityKey
+          AttributeType: S
+        - AttributeName: typeDate
+          AttributeType: S
+      KeySchema:
+        - AttributeName: cityKey
+          KeyType: HASH
+        - AttributeName: typeDate
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # ───────────────────────────────
+  # DYNAMODB — locationDB
+  # PK: cityKey (IE#DUBLIN)
+  # Stores city metadata, centroid coords, activeRouteCount
+  # activeRouteCount maintained atomically via TransactWriteItems in routeCreate/routeDelete
+  # active: false when activeRouteCount hits zero — scrapers skip inactive cities
+  # ───────────────────────────────
+  LocationDB:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: locationDB
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: cityKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: cityKey
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+  # ───────────────────────────────
+  # API GATEWAY
+  # ───────────────────────────────
+  RouteGW:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: routeGW
+      StageName: prod
+      Description: REST API Gateway for route operations
+      EndpointConfiguration:
+        Type: REGIONAL
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+            Identity:
+              Header: Authorization
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          MetricsEnabled: true
+
+  # ───────────────────────────────
+  # API LAMBDAS
+  # ───────────────────────────────
+  RouteFetchLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: routeFetch
+      CodeUri: src/api/routeFetch/
+      Handler: routeFetch.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Events:
+        FetchRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RouteGW
+            Path: /routes/fetch
+            Method: GET
+
+  RouteCreateLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: routeCreate
+      CodeUri: src/api/routeCreate/
+      Handler: routeCreate.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Events:
+        CreateRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RouteGW
+            Path: /routes/create
+            Method: POST
+
+  RouteUpdateLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: routeUpdate
+      CodeUri: src/api/routeUpdate/
+      Handler: routeUpdate.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Events:
+        UpdateRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RouteGW
+            Path: /routes/update
+            Method: PUT
+
+  RouteDeleteLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: routeDelete
+      CodeUri: src/api/routeDelete/
+      Handler: routeDelete.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Events:
+        DeleteRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RouteGW
+            Path: /routes/delete
+            Method: DELETE
+
+  # ───────────────────────────────
+  # BATCH LAMBDAS
+  # ───────────────────────────────
+  WeatherScraperLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: weatherScraper
+      CodeUri: src/batch/weatherScraper/
+      Handler: weatherScraper.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+  EventScraperLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: eventScraper
+      CodeUri: src/batch/eventScraper/
+      Handler: eventScraper.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+  DelayOrchestratorLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: delayOrchestrator
+      CodeUri: src/batch/delayOrchestrator/
+      Handler: delayOrchestrator.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+  DelayWorkerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: delayWorker
+      CodeUri: src/batch/delayWorker/
+      Handler: delayWorker.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt DelayWorkerQueue.Arn
+            BatchSize: 1                  # One SQS message (chunk) per Lambda invocation
+            ScalingConfig:
+              MaximumConcurrency: 20      # Max 20 worker Lambdas running simultaneously
+
+  # ───────────────────────────────
+  # REGISTRATION TRIGGERS
+  # ───────────────────────────────
+  PostConfirmationLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: postConfirmation
+      CodeUri: src/registration/
+      Handler: postConfirmation.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 10
+      MemorySize: 128
+
+  PostConfirmationLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PostConfirmationLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  # ───────────────────────────────
+  # EVENTBRIDGE
+  # 23:00 GMT — weatherScraper + eventScraper
+  # 00:00 GMT — delayOrchestrator (1 hour after scrapers)
+  # ───────────────────────────────
+  ScrapersRule:
+    Type: AWS::Events::Rule
+    DependsOn:
+      - WeatherScraperLambda
+      - EventScraperLambda
+    Properties:
+      Name: scrapersSchedule
+      Description: Triggers weatherScraper and eventScraper nightly at 23:00 GMT
+      ScheduleExpression: cron(0 23 * * ? *)
+      State: ENABLED
+      Targets:
+        - Id: weatherScraperTarget
+          Arn: !GetAtt WeatherScraperLambda.Arn
+        - Id: eventScraperTarget
+          Arn: !GetAtt EventScraperLambda.Arn
+
+  WeatherScraperLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt WeatherScraperLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScrapersRule.Arn
+
+  EventScraperLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt EventScraperLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScrapersRule.Arn
+
+  DelayCalculatorRule:
+    Type: AWS::Events::Rule
+    DependsOn: DelayOrchestratorLambda
+    Properties:
+      Name: delayCalculatorSchedule
+      Description: Triggers delayOrchestrator nightly at 00:00 GMT (1 hour after scrapers)
+      ScheduleExpression: cron(0 0 * * ? *)
+      State: ENABLED
+      Targets:
+        - Id: delayOrchestratorTarget
+          Arn: !GetAtt DelayOrchestratorLambda.Arn
+
+  DelayCalculatorLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt DelayOrchestratorLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DelayCalculatorRule.Arn
+
+  # ───────────────────────────────
+  # SNS — alert topic for operational alarms
+  # Subscribe an email address via the console after deployment
+  # ───────────────────────────────
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: routeAppAlerts
+      DisplayName: Route App Operational Alerts
+
+  # ───────────────────────────────
+  # CLOUDWATCH ALARMS
+  # ───────────────────────────────
+
+  # Fires when any message lands in the DLQ — means delayWorker
+  # failed a chunk 3 times. Investigate CloudWatch logs immediately.
+  DLQDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: delayWorkerDLQ-MessageDepth
+      AlarmDescription: Messages in delayWorkerDLQ — delayWorker chunk failed after 3 retries
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt DelayWorkerDLQ.QueueName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+      OKActions:
+        - !Ref AlertTopic
+
+  # Fires if delayOrchestrator errors or times out — nightly pipeline blocked
+  OrchestratorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: delayOrchestrator-Errors
+      AlarmDescription: delayOrchestrator Lambda errors — nightly forecast pipeline may be blocked
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DelayOrchestratorLambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  # Fires if delayOrchestrator approaches its 300s timeout
+  # Indicates the schedule scan is growing too large for a single invocation
+  OrchestratorDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: delayOrchestrator-Duration
+      AlarmDescription: delayOrchestrator approaching timeout — schedule scan may need optimisation
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DelayOrchestratorLambda
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 240000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+Outputs:
+  ApiGatewayUrl:
+    Description: Base URL for routeGW REST API
+    Value: !Sub https://${RouteGW}.execute-api.${AWS::Region}.amazonaws.com/prod
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+
+  UserRouteDBName:
+    Description: userRouteDB table name
+    Value: !Ref UserRouteDB
+
+  DelaysDBName:
+    Description: delaysDB table name
+    Value: !Ref DelaysDB
+
+  LocationDBName:
+    Description: locationDB table name
+    Value: !Ref LocationDB
+
+  DelayWorkerQueueUrl:
+    Description: SQS queue URL for delay worker chunks
+    Value: !Ref DelayWorkerQueue
+
+  DelayWorkerDLQUrl:
+    Description: SQS dead-letter queue URL for failed delay worker chunks
+    Value: !Ref DelayWorkerDLQ
+
+  AlertTopicArn:
+    Description: SNS topic ARN for operational alerts — subscribe an email via console after deployment
+    Value: !Ref AlertTopic
+

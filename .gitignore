@@ -1,3 +1,13 @@
+## SAM ###
+
+# Secrets 
+.secrets/
+
+# SAM build output
+.aws-sam/
+
+### Android ###
+
 # Gradle files
 .gradle/
 build/

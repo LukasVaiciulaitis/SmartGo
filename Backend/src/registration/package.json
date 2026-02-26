@@ -1,0 +1,10 @@
+{
+  "name": "post-confirmation",
+  "version": "1.0.0",
+  "description": "Cognito post-confirmation trigger — writes PROFILE record to userRouteDB",
+  "main": "postConfirmation.js",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/util-dynamodb": "^3.0.0"
+  }
+}

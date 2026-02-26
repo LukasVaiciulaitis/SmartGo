@@ -1,0 +1,9 @@
+{
+  "name": "utils-layer",
+  "version": "1.0.0",
+  "description": "Shared utilities layer — chunkArray, parseDurationToMinutes, batchGet, batchWrite",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/util-dynamodb": "^3.0.0"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "event-scraper",
+  "version": "1.0.0",
+  "description": "Nightly scraper — fetches events per active city from Ticketmaster",
+  "main": "eventScraper.js",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/client-ssm": "^3.0.0",
+    "@aws-sdk/util-dynamodb": "^3.0.0"
+  }
+}
