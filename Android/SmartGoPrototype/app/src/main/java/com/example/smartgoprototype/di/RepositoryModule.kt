@@ -1,6 +1,6 @@
 package com.example.smartgoprototype.di
 
-import com.example.smartgoprototype.data.repository.RouteRepositoryStub
+import com.example.smartgoprototype.data.repository.RouteRepositoryImpl
 import com.example.smartgoprototype.domain.repository.RouteRepository
 import dagger.Binds
 import dagger.Module
@@ -19,6 +19,6 @@ abstract class RepositoryModule {
     @Binds
     @Singleton
     abstract fun bindRouteRepository(
-        impl: RouteRepositoryStub
+        impl: RouteRepositoryImpl
     ): RouteRepository
 }

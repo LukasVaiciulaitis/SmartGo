@@ -7,8 +7,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import com.example.smartgoprototype.domain.model.GoogleAddressComponent
 import com.example.smartgoprototype.domain.model.PlaceLocation
+import com.google.android.libraries.places.api.Places
 import com.google.android.libraries.places.api.model.AutocompleteSessionToken
+import com.google.android.libraries.places.api.model.Place
+import com.google.android.libraries.places.api.net.FetchPlaceRequest
 import com.google.android.libraries.places.widget.PlaceAutocomplete
 import com.google.android.libraries.places.widget.PlaceAutocompleteActivity
 
@@ -19,6 +23,7 @@ fun rememberPlaceAutocompleteLauncher(
     onError: (String) -> Unit = {}
 ): () -> Unit {
     val sessionToken = remember { AutocompleteSessionToken.newInstance() }
+    val placesClient = remember { Places.createClient(context) }
 
     fun buildIntent(): Intent =
         PlaceAutocomplete.IntentBuilder()
@@ -40,15 +45,41 @@ fun rememberPlaceAutocompleteLauncher(
                     return@rememberLauncherForActivityResult
                 }
 
-                onSelected(
-                    PlaceLocation(
-                        placeId = prediction.placeId,
-                        name = prediction.getPrimaryText(null)?.toString(),
-                        address = prediction.getFullText(null)?.toString(),
-                        lat = null,
-                        lng = null
-                    )
+                val placeId = prediction.placeId
+                val label = prediction.getFullText(null)?.toString()
+                    ?: prediction.getPrimaryText(null)?.toString()
+                    ?: placeId
+
+                val fields = listOf(
+                    Place.Field.ADDRESS_COMPONENTS
                 )
+
+                val request = FetchPlaceRequest.builder(placeId, fields)
+                    .setSessionToken(sessionToken)
+                    .build()
+
+                placesClient.fetchPlace(request)
+                    .addOnSuccessListener { response ->
+                        val place = response.place
+                        val comps = place.addressComponents?.asList()?.map { c ->
+                            GoogleAddressComponent(
+                                longText = c.name,
+                                shortText = c.shortName,
+                                types = c.types
+                            )
+                        }.orEmpty()
+
+                        onSelected(
+                            PlaceLocation(
+                                placeId = placeId,
+                                label = label,
+                                addressComponents = comps
+                            )
+                        )
+                    }
+                    .addOnFailureListener { e ->
+                        onError(e.message ?: "Failed to fetch place details.")
+                    }
             }
 
             PlaceAutocompleteActivity.RESULT_ERROR -> {

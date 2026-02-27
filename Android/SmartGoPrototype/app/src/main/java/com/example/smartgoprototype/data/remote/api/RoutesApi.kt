@@ -1,7 +1,7 @@
 package com.example.smartgoprototype.data.remote.api
 
 import com.example.smartgoprototype.data.remote.dto.CreateRouteRequest
-import com.example.smartgoprototype.data.remote.dto.RouteDto
+import com.example.smartgoprototype.data.remote.dto.CreateRouteResponseDto
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
@@ -21,14 +21,14 @@ interface RoutesApi {
      *
      */
     @GET("routes")
-    suspend fun getRoutes(): List<RouteDto>
+    suspend fun getRoutes(): List<CreateRouteResponseDto>
 
     /**
      * Creates a new route.
      *
      */
-    @POST("routes")
+    @POST("routes/create")
     suspend fun createRoute(
         @Body request: CreateRouteRequest
-    ): RouteDto
+    ): CreateRouteResponseDto
 }

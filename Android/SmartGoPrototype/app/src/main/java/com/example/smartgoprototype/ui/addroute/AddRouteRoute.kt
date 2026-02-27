@@ -19,6 +19,7 @@ fun AddRouteRoute(
         onTitleChange = viewModel::onTitleChange,
         onOriginSelected = viewModel::onOriginSelected,
         onDestinationSelected = viewModel::onDestinationSelected,
+        onTravelModeSelected = viewModel::onTravelModeSelected,
         onArriveByChange = viewModel::onArriveByChange,
         onToggleDay = viewModel::toggleDay,
         onSave = { viewModel.save(onSaved) }

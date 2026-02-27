@@ -11,6 +11,7 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import okhttp3.OkHttpClient
+import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import javax.inject.Singleton
@@ -26,7 +27,7 @@ import javax.inject.Singleton
 object NetworkModule {
 
     //TODO: move this to BuildConfig
-    private const val BASE_URL = "https://0y1xbqkvj7.execute-api.eu-north-1.amazonaws.com/"
+    private const val BASE_URL = "https://5nbb7vod06.execute-api.eu-west-1.amazonaws.com/prod/"
 
     /**
      * SessionProvider is separated to keep AuthInterceptor testable and to avoid coupling OkHttp to
@@ -56,8 +57,14 @@ object NetworkModule {
     fun provideOkHttpClient(
         authInterceptor: AuthInterceptor
     ): OkHttpClient {
+
+        val logging = HttpLoggingInterceptor().apply {
+            level = HttpLoggingInterceptor.Level.BODY
+        }
+
         return OkHttpClient.Builder()
             .addInterceptor(authInterceptor)
+            .addInterceptor(logging)
             .build()
     }
 

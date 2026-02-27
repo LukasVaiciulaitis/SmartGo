@@ -88,7 +88,7 @@ private fun RouteItem(route: Route) {
         Text(route.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
         Text(
-            text = "${route.origin.address ?: route.origin.name ?: "Origin"} → ${route.destination.address ?: route.destination.name ?: "Destination"}",
+            text = "${route.origin.label.ifBlank { "Origin" }} → ${route.destination.label.ifBlank { "Destination" }}",
             style = MaterialTheme.typography.bodyMedium
         )
         Spacer(Modifier.height(2.dp))

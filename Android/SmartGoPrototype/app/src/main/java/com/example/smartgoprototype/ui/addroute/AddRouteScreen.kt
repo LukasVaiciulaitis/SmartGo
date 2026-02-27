@@ -40,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.smartgoprototype.domain.model.PlaceLocation
+import com.example.smartgoprototype.domain.model.TravelMode
 import java.time.DayOfWeek
 import java.time.format.TextStyle
 import java.util.Locale
@@ -52,6 +53,7 @@ fun AddRouteScreen(
     onTitleChange: (String) -> Unit,
     onOriginSelected: (PlaceLocation) -> Unit,
     onDestinationSelected: (PlaceLocation) -> Unit,
+    onTravelModeSelected: (TravelMode) -> Unit,
     onArriveByChange: (hour: Int, minute: Int) -> Unit,
     onToggleDay: (DayOfWeek) -> Unit,
     onSave: () -> Unit
@@ -124,35 +126,30 @@ fun AddRouteScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+
+            TravelModePicker(
+                selected = uiState.travelMode,
+                onSelected = onTravelModeSelected
+            )
+
+            PlaceField(
+                label = "Origin",
+                value = uiState.origin?.label,
+                onPick = originPicker
+            )
+
+            PlaceField(
+                label = "Destination",
+                value = uiState.destination?.label,
+                onPick = destinationPicker
+            )
+
             OutlinedTextField(
                 value = uiState.title,
                 onValueChange = onTitleChange,
                 label = { Text("Route title") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
-            )
-
-            PlaceField(
-                label = "Origin",
-                value = uiState.origin?.address ?: uiState.origin?.name,
-                onPick = originPicker
-            )
-
-            PlaceField(
-                label = "Destination",
-                value = uiState.destination?.address ?: uiState.destination?.name,
-                onPick = destinationPicker
-            )
-
-            OutlinedTextField(
-                value = "%02d:%02d".format(uiState.arriveBy.hour, uiState.arriveBy.minute),
-                onValueChange = {},
-                readOnly = true,
-                label = { Text("Arrive by") },
-                modifier = Modifier.fillMaxWidth(),
-                supportingText = {
-                    Text("Stored as minutes since midnight + timezone for backend.")
-                }
             )
             TextButton(onClick = { showTimePicker = true }) { Text("Change time") }
 
@@ -191,6 +188,29 @@ private fun PlaceField(
             ) {
                 Text(value ?: "Tap to select", style = MaterialTheme.typography.bodyLarge)
                 TextButton(onClick = onPick) { Text("Pick") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TravelModePicker(
+    selected: TravelMode,
+    onSelected: (TravelMode) -> Unit
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Text("Travel mode", style = MaterialTheme.typography.labelLarge)
+        Spacer(Modifier.height(8.dp))
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            TravelMode.values().forEach { mode ->
+                FilterChip(
+                    selected = selected == mode,
+                    onClick = { onSelected(mode) },
+                    label = { Text(mode.name.replace('_', ' ')) }
+                )
             }
         }
     }

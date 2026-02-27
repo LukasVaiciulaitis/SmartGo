@@ -1,6 +1,7 @@
 package com.example.smartgoprototype.ui.addroute
 
 import com.example.smartgoprototype.domain.model.PlaceLocation
+import com.example.smartgoprototype.domain.model.TravelMode
 import java.time.DayOfWeek
 import java.time.LocalTime
 
@@ -8,6 +9,7 @@ data class AddRouteUiState(
     val title: String = "",
     val origin: PlaceLocation? = null,
     val destination: PlaceLocation? = null,
+    val travelMode: TravelMode = TravelMode.DRIVE,
     val arriveBy: LocalTime = LocalTime.of(9, 0),
     val activeDays: Set<DayOfWeek> = setOf(
         DayOfWeek.MONDAY,
@@ -20,5 +22,9 @@ data class AddRouteUiState(
     val errorMessage: String? = null
 ) {
     val canSave: Boolean
-        get() = title.isNotBlank() && origin != null && destination != null && activeDays.isNotEmpty() && !isSaving
+        get() = title.isNotBlank() &&
+                origin != null &&
+                destination != null &&
+                activeDays.isNotEmpty() &&
+                !isSaving
 }

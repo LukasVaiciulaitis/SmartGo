@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.smartgoprototype.domain.model.PlaceLocation
 import com.example.smartgoprototype.domain.model.RouteSchedule
+import com.example.smartgoprototype.domain.model.TravelMode
 import com.example.smartgoprototype.domain.repository.RouteRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,6 +42,10 @@ class AddRouteViewModel @Inject constructor(
 
     fun onDestinationSelected(place: PlaceLocation) {
         _uiState.value = _uiState.value.copy(destination = place, errorMessage = null)
+    }
+
+    fun onTravelModeSelected(mode: TravelMode) {
+        _uiState.value = _uiState.value.copy(travelMode = mode, errorMessage = null)
     }
 
     fun onArriveByChange(hour: Int, minute: Int) {
@@ -81,11 +86,14 @@ class AddRouteViewModel @Inject constructor(
                     // Store IANA zone ID so scheduling logic can be interpreted correctly later.
                     timeZoneId = ZoneId.systemDefault().id
                 )
+
                 routeRepository.addRoute(
                     title = state.title.trim(),
                     // `canSave` ensures these are non-null; `requireNotNull` keeps the types safe.
                     origin = requireNotNull(state.origin),
                     destination = requireNotNull(state.destination),
+                    intermediates = emptyList(),
+                    travelMode = state.travelMode,
                     schedule = schedule
                 )
             }.onSuccess {
