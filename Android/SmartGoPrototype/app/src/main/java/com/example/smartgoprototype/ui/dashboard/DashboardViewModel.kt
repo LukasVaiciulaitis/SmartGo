@@ -21,24 +21,49 @@ class DashboardViewModel @Inject constructor(
     private val routeRepository: RouteRepository
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(DashboardUiState(isLoading = true))
+    private val _uiState = MutableStateFlow(DashboardUiState(isInitialLoading = true))
     val uiState: StateFlow<DashboardUiState> = _uiState
 
     // Initial load when the ViewModel is first created.
-    init { loadRoutes() }
+    init { loadInitial() }
 
     /**
-     * Reloads routes (e.g., pull-to-refresh or when returning from "Add Route").
+     * Performs first-screen load.
      */
-    fun loadRoutes() {
-        _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
+    fun loadInitial() {
+        fetchRoutes(isRefresh = false)
+    }
+
+    /**
+     * Pull-to-refresh / explicit user refresh.
+     */
+    fun refresh() {
+        fetchRoutes(isRefresh = true)
+    }
+
+    private fun fetchRoutes(isRefresh: Boolean) {
+        _uiState.value = _uiState.value.copy(
+            isInitialLoading = !isRefresh,
+            isRefreshing = isRefresh,
+            errorMessage = null
+        )
+
         viewModelScope.launch {
             try {
                 val routes = routeRepository.getRoutes()
-                _uiState.value = _uiState.value.copy(isLoading = false, routes = routes, errorMessage = null)
+                _uiState.value = _uiState.value.copy(
+                    isInitialLoading = false,
+                    isRefreshing = false,
+                    routes = routes,
+                    errorMessage = null
+                )
             } catch (e: Exception) {
                 // Keep error messaging user-friendly; the exception message is used as best-effort detail.
-                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = e.message ?: "Failed to load routes")
+                _uiState.value = _uiState.value.copy(
+                    isInitialLoading = false,
+                    isRefreshing = false,
+                    errorMessage = e.message ?: "Failed to load routes"
+                )
             }
         }
     }

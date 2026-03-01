@@ -29,7 +29,7 @@ fun DashboardRoute(
         val stateHandle = savedStateHandle ?: return@LaunchedEffect
         stateHandle.getStateFlow("route_created", false).collectLatest { created ->
             if (created) {
-                viewModel.loadRoutes()
+                viewModel.refresh()
                 stateHandle["route_created"] = false
             }
         }
@@ -38,6 +38,7 @@ fun DashboardRoute(
     DashboardScreen(
         uiState = uiState,
         onAddRouteClick = onNavigateToAddRoute,
+        onRefresh = viewModel::refresh,
         onLogoutClick = {
             Amplify.Auth.signOut { signOutResult ->
                 scope.launch(Dispatchers.Main) {
