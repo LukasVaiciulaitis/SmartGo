@@ -60,13 +60,17 @@ fun rememberPlaceAutocompleteLauncher(
                 placesClient.fetchPlace(request)
                     .addOnSuccessListener { response ->
                         val place = response.place
-                        val comps = place.addressComponents?.asList()?.map { c ->
-                            GoogleAddressComponent(
-                                longText = c.name,
-                                shortText = c.shortName,
-                                types = c.types
-                            )
-                        }.orEmpty()
+                        val comps = place.addressComponents?.asList()
+                            ?.mapNotNull { c ->
+                                val sanitizedTypes = c.types.filter { it.isNotBlank() }
+                                if (sanitizedTypes.isEmpty()) return@mapNotNull null
+                                GoogleAddressComponent(
+                                    longText = c.name,
+                                    shortText = c.shortName,
+                                    types = sanitizedTypes
+                                )
+                            }
+                            .orEmpty()
 
                         onSelected(
                             PlaceLocation(

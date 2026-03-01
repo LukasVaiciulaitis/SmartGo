@@ -89,14 +89,21 @@ class RouteRepositoryImpl @Inject constructor(
 
     private fun PlaceLocation.toEndpointPlace(requireComponents: Boolean): EndpointPlace {
         val components = addressComponents
-        if (requireComponents && components.isNullOrEmpty()) {
-            throw IllegalStateException("addressComponents missing for placeId=$placeId")
+            .orEmpty()
+            .mapNotNull { component ->
+                val sanitizedTypes = component.types.filter { it.isNotBlank() }
+                if (sanitizedTypes.isEmpty()) return@mapNotNull null
+                component.copy(types = sanitizedTypes)
+            }
+
+        if (requireComponents && components.isEmpty()) {
+            throw IllegalStateException("addressComponents missing or invalid for placeId=$placeId")
         }
 
         return EndpointPlace(
             placeId = placeId,
             label = label,
-            addressComponents = (components ?: emptyList()).map {
+            addressComponents = components.map {
                 GoogleAddressComponentDto(
                     longText = it.longText,
                     shortText = it.shortText,
