@@ -135,7 +135,12 @@ fun SmartGoAppNavHost(
         composable(Routes.ADD_ROUTE) {
             AddRouteRoute(
                 onBack = { navController.popBackStack() },
-                onSaved = { navController.popBackStack() } // return to dashboard
+                onSaved = {
+                    navController.previousBackStackEntry
+                        ?.savedStateHandle
+                        ?.set("route_created", true)
+                    navController.popBackStack()
+                } // return to dashboard
             )
         }
     }

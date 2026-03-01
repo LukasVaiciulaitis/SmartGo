@@ -2,6 +2,7 @@ package com.example.smartgoprototype.ui.dashboard
 
 import android.util.Log
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
@@ -11,6 +12,7 @@ import com.amplifyframework.auth.cognito.result.AWSCognitoAuthSignOutResult
 import com.amplifyframework.core.Amplify
 import com.example.smartgoprototype.Routes
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 @Composable
@@ -21,6 +23,17 @@ fun DashboardRoute(
 ) {
     val scope = rememberCoroutineScope()
     val uiState by viewModel.uiState.collectAsState()
+    val savedStateHandle = navController.currentBackStackEntry?.savedStateHandle
+
+    LaunchedEffect(savedStateHandle) {
+        val stateHandle = savedStateHandle ?: return@LaunchedEffect
+        stateHandle.getStateFlow("route_created", false).collectLatest { created ->
+            if (created) {
+                viewModel.loadRoutes()
+                stateHandle["route_created"] = false
+            }
+        }
+    }
 
     DashboardScreen(
         uiState = uiState,

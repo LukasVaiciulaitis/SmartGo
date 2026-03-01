@@ -12,8 +12,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.smartgoprototype.domain.model.Route
-import java.time.format.TextStyle
-import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -80,21 +78,11 @@ private fun RoutesList(routes: List<Route>, modifier: Modifier = Modifier) {
 
 @Composable
 private fun RouteItem(route: Route) {
-    val days = route.schedule.activeDays
-        .sortedBy { it.value }
-        .joinToString { it.getDisplayName(TextStyle.SHORT, Locale.getDefault()) }
-
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        Text(route.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(4.dp))
         Text(
-            text = "${route.origin.label.ifBlank { "Origin" }} → ${route.destination.label.ifBlank { "Destination" }}",
-            style = MaterialTheme.typography.bodyMedium
-        )
-        Spacer(Modifier.height(2.dp))
-        Text(
-            text = "Arrive by: ${route.schedule.arriveByMinutes / 60}:${(route.schedule.arriveByMinutes % 60).toString().padStart(2, '0')} • $days",
-            style = MaterialTheme.typography.bodySmall
+            route.title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold
         )
     }
 }
