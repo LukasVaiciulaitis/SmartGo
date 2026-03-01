@@ -28,7 +28,6 @@ fun rememberPlaceAutocompleteLauncher(
     fun buildIntent(): Intent =
         PlaceAutocomplete.IntentBuilder()
             .setAutocompleteSessionToken(sessionToken)
-            // .setCountries(listOf("IE"))
             .build(context)
 
     val launcher = rememberLauncherForActivityResult(
