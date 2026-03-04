@@ -1,10 +1,15 @@
-## SAM ###
+### SAM ###
 
 # Secrets 
 .secrets/
 
 # SAM build output
 .aws-sam/
+
+### Backend ###
+
+# Node Packages
+.node_modules/
 
 ### Android ###
 

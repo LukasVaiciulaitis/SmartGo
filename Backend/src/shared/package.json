@@ -1,9 +1,13 @@
 {
   "name": "utils-layer",
   "version": "1.0.0",
-  "description": "Shared utilities layer — chunkArray, parseDurationToMinutes, batchGet, batchWrite",
+  "description": "Shared utilities layer — all AWS SDK packages and shared helpers for all Lambdas",
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/util-dynamodb": "^3.0.0"
+    "@aws-sdk/client-dynamodb": "3.696.0",
+    "@aws-sdk/client-sqs": "3.696.0",
+    "@aws-sdk/client-ssm": "3.696.0",
+    "@aws-sdk/util-dynamodb": "3.696.0",
+    "adm-zip": "^0.5.16",
+    "gtfs-realtime-bindings": "^1.1.1"
   }
 }
