@@ -1,21 +1,16 @@
 // routeDelete — DELETE /routes/delete
 // Deactivates SCHEDULE# first (stops nightly processing), then deletes ROUTE# and FORECAST#.
 // Decrements activeRouteCount in locationDB atomically with ROUTE# deletion via transaction.
-// When activeRouteCount reaches zero, sets active: false — scrapers skip the city.
+// When activeRouteCount reaches zero, scrapers skip the city (they filter activeRouteCount > 0).
 // SCHEDULE# uses TTL for final cleanup — DynamoDB auto-expires within 48 hours.
 
 const { DynamoDBClient, GetItemCommand, DeleteItemCommand, UpdateItemCommand, TransactWriteItemsCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
+const { response, UUID_REGEX } = require('/opt/nodejs/utils');
 
 const client = new DynamoDBClient({});
 const USER_ROUTE_TABLE = process.env.USER_ROUTE_TABLE;
 const LOCATION_DB_TABLE = process.env.LOCATION_DB_TABLE;
-
-const response = (statusCode, body) => ({
-  statusCode,
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(body)
-});
 
 exports.handler = async (event) => {
   console.log('routeDelete invoked');
@@ -32,6 +27,7 @@ exports.handler = async (event) => {
 
   const { routeId } = body;
   if (!routeId) return response(400, { error: 'routeId is required in request body' });
+  if (!UUID_REGEX.test(routeId)) return response(400, { error: 'routeId must be a valid UUID' });
 
   let route;
 
@@ -89,7 +85,8 @@ exports.handler = async (event) => {
             TableName: USER_ROUTE_TABLE,
             Key: marshall({ userId, recordType: 'PROFILE' }),
             UpdateExpression: 'ADD routeCount :dec',
-            ExpressionAttributeValues: marshall({ ':dec': -1 })
+            ConditionExpression: 'routeCount > :zero',
+            ExpressionAttributeValues: marshall({ ':dec': -1, ':zero': 0 })
           }
         }
       ]
@@ -111,33 +108,62 @@ exports.handler = async (event) => {
     return response(200, { message: 'Route deleted successfully', routeId });
 
   } catch (err) {
-    // TransactionCanceledException from the locationDB ConditionExpression
-    // means activeRouteCount was already zero — city is already inactive, safe to ignore
+    // TransactionCanceledException — one of the two ConditionExpressions failed.
+    // CancellationReasons indices correspond to TransactItems order:
+    //   [0] Delete ROUTE#     — no condition, never the cause
+    //   [1] Update locationDB — condition: activeRouteCount > 0
+    //   [2] Update PROFILE    — condition: routeCount > 0
     if (err.name === 'TransactionCanceledException') {
       const reasons = err.CancellationReasons || [];
-      const conditionFailed = reasons.some(r => r.Code === 'ConditionalCheckFailed');
-      if (conditionFailed) {
-        // Transaction was cancelled — ROUTE# was not deleted; clean it up explicitly
+      const locationConditionFailed = reasons[1]?.Code === 'ConditionalCheckFailed';
+      const profileConditionFailed  = reasons[2]?.Code === 'ConditionalCheckFailed';
+
+      if (locationConditionFailed || profileConditionFailed) {
+        // Transaction was cancelled — ROUTE# was not deleted; clean it up explicitly.
+        // If this delete fails, surface 500 — the route still exists and cannot be retried
+        // without potentially double-decrementing the counters.
         try {
           await client.send(new DeleteItemCommand({
             TableName: USER_ROUTE_TABLE,
             Key: marshall({ userId, recordType: `ROUTE#${routeId}` })
           }));
         } catch (cleanupErr) {
-          console.warn(`ROUTE# cleanup failed after condition failure: routeId=${routeId}:`, cleanupErr.message);
+          console.error(`ROUTE# cleanup failed after condition failure: routeId=${routeId}:`, cleanupErr.message);
+          return response(500, { error: 'Internal server error' });
         }
-        // Transaction also rolled back the PROFILE decrement — apply it manually
-        try {
-          await client.send(new UpdateItemCommand({
-            TableName: USER_ROUTE_TABLE,
-            Key: marshall({ userId, recordType: 'PROFILE' }),
-            UpdateExpression: 'ADD routeCount :dec',
-            ExpressionAttributeValues: marshall({ ':dec': -1 })
-          }));
-        } catch (profileErr) {
-          console.warn(`PROFILE routeCount decrement failed after condition failure: userId=${userId}:`, profileErr.message);
+
+        if (locationConditionFailed) {
+          // activeRouteCount was already 0 — city already inactive, no locationDB update needed.
+          // Transaction rolled back the PROFILE decrement — apply it manually.
+          try {
+            await client.send(new UpdateItemCommand({
+              TableName: USER_ROUTE_TABLE,
+              Key: marshall({ userId, recordType: 'PROFILE' }),
+              UpdateExpression: 'ADD routeCount :dec',
+              ConditionExpression: 'routeCount > :zero',
+              ExpressionAttributeValues: marshall({ ':dec': -1, ':zero': 0 })
+            }));
+          } catch (profileErr) {
+            console.warn(`PROFILE routeCount decrement skipped or failed for userId=${userId}:`, profileErr.message);
+          }
+          console.warn(`activeRouteCount already zero for cityKey=${route?.cityKey} — city already inactive`);
+        } else {
+          // routeCount was already 0 — data inconsistency (ROUTE# existed but PROFILE counter
+          // was at floor). Transaction rolled back the locationDB decrement — apply it manually.
+          try {
+            await client.send(new UpdateItemCommand({
+              TableName: LOCATION_DB_TABLE,
+              Key: marshall({ cityKey: route.cityKey }),
+              UpdateExpression: 'ADD activeRouteCount :dec SET lastActiveAt = :ts',
+              ConditionExpression: 'activeRouteCount > :zero',
+              ExpressionAttributeValues: marshall({ ':dec': -1, ':zero': 0, ':ts': new Date().toISOString() })
+            }));
+          } catch (locationErr) {
+            console.warn(`locationDB activeRouteCount decrement failed for cityKey=${route?.cityKey}:`, locationErr.message);
+          }
+          console.warn(`routeCount floor hit for userId=${userId} — PROFILE counter was 0 while ROUTE# existed (data inconsistency)`);
         }
-        console.warn(`activeRouteCount already zero for cityKey=${route?.cityKey} — city already inactive`);
+
         return response(200, { message: 'Route deleted successfully', routeId });
       }
     }

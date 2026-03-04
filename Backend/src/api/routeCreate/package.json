@@ -3,8 +3,5 @@
   "version": "1.0.0",
   "description": "POST /routes/create — creates ROUTE# and SCHEDULE# records atomically",
   "main": "routeCreate.js",
-  "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/util-dynamodb": "^3.0.0"
-  }
+  "dependencies": {}
 }

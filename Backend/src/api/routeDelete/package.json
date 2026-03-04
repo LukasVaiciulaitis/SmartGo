@@ -3,8 +3,5 @@
   "version": "1.0.0",
   "description": "DELETE /routes/delete — deletes ROUTE#, SCHEDULE# and FORECAST# records",
   "main": "routeDelete.js",
-  "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/util-dynamodb": "^3.0.0"
-  }
+  "dependencies": {}
 }

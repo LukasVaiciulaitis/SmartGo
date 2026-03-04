@@ -3,8 +3,5 @@
   "version": "1.0.0",
   "description": "PUT /routes/update — partial update of ROUTE# or SCHEDULE# record",
   "main": "routeUpdate.js",
-  "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/util-dynamodb": "^3.0.0"
-  }
+  "dependencies": {}
 }

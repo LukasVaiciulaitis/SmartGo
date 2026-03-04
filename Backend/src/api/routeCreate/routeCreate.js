@@ -1,18 +1,16 @@
 // routeCreate — POST /routes/create
 // Creates ROUTE# and SCHEDULE# atomically with locationDB update in a single transaction.
-// City metadata (city, countryCode) supplied by Android from Google Places SDK.
-// cityLat/cityLng derived from origin coordinates — sufficient for city-level scraping.
+// City metadata (city, countryCode) supplied by Android from Google Places SDK per waypoint.
+// cityLat/cityLng derived from resolved coordinates returned by the Routes API.
 // userId from Cognito token — never from request body.
 // Max 20 routes per user enforced before creation.
 //
-// Request contract mirrors Google Maps Routes API structures to minimise Android-side mapping:
-//   origin/destination use Google's nested { location: { latLng: { latitude, longitude } } }
-//   intermediates mirrors Google's intermediates array (same name and structure)
+// Phase 2 request contract:
+//   origin/destination carry { placeId, label, addressComponents } — no location.latLng from client.
+//   addressComponents is the raw Google Places SDK addressComponents array for the selected place.
+//   city/countryCode are extracted server-side via extractCityFromComponents, handling locality,
+//   postal_town (strips district number e.g. "Dublin 7" → "Dublin"), and admin_area_level_1 fallback.
 //   travelMode mirrors Google's travelMode field and values (DRIVE, TRANSIT, WALK, TWO_WHEELER, BICYCLE)
-//   distanceMeters mirrors Google's distanceMeters field name
-//   staticDuration mirrors Google's staticDuration field — baseline without traffic, e.g. "1320s" or plain integer seconds
-//   duration maps to trafficDuration internally — Google's traffic-aware duration, e.g. "1440s" — optional (omit for WALK/TRANSIT where values are identical)
-//   geometry accepts a scoped subset of Google's route response — encodedPolyline + legs
 //
 // Timezone handling:
 //   arriveBy is stored as the user's LOCAL time intent e.g. "08:45" — NOT UTC
@@ -24,48 +22,17 @@
 const { DynamoDBClient, TransactWriteItemsCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall } = require('@aws-sdk/util-dynamodb');
 const { randomUUID } = require('crypto');
-const { parseDurationToMinutes } = require('/opt/nodejs/utils');
+const { parseDurationToMinutes, callWithRetry, response, MAX_ROUTES_PER_USER, VALID_DAYS, VALID_TRAVEL_MODES, isValidIANATimezone, computeArrivalUTC, validateWaypoint, validateAddressComponents, extractCityFromComponents, buildCityObject, normaliseWaypoint, getRoutesApiKey, callRoutesApi } = require('/opt/nodejs/utils');
 
-const client = new DynamoDBClient({});
+const dynamoClient = new DynamoDBClient({});
 const USER_ROUTE_TABLE = process.env.USER_ROUTE_TABLE;
 const LOCATION_DB_TABLE = process.env.LOCATION_DB_TABLE;
-const MAX_ROUTES_PER_USER = 20;
 
-const response = (statusCode, body) => ({
-  statusCode,
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(body)
-});
-
-// Validate a waypoint using Google's nested location structure
-// { location: { latLng: { latitude, longitude } }, label, placeId? }
-const validateWaypoint = (waypoint, name) => {
-  if (!waypoint || typeof waypoint !== 'object')
-    return `${name} is required`;
-
-  const latLng = waypoint?.location?.latLng;
-  if (!latLng)
-    return `${name} must include location.latLng`;
-  if (typeof latLng.latitude !== 'number' || typeof latLng.longitude !== 'number')
-    return `${name}.location.latLng latitude and longitude must be numbers`;
-  if (!waypoint.label || typeof waypoint.label !== 'string' || waypoint.label.trim() === '')
-    return `${name} must include a label`;
-
-  return null;
-};
-
-// Basic IANA timezone format check — e.g. "Europe/Dublin", "America/New_York", "UTC"
-// Full validation happens implicitly in delayWorker when the timezone is used for conversion
-const isValidIANATimezone = (tz) => {
-  if (typeof tz !== 'string' || tz.trim() === '') return false;
-  // IANA identifiers are Region/City or fixed UTC offsets — reject obviously malformed values
-  return /^[A-Za-z]+([/_+-][A-Za-z0-9_+-]+)*$/.test(tz);
-};
-
-// Returns { error: string } on failure, or { error: null, staticDuration, trafficDuration } on success.
-// Parsed duration values are returned directly to avoid re-parsing in the handler.
+// ─── Validation ───────────────────────────────────────────────────────────────
+// Returns { error: string } on failure, null error on success.
+// Phase 2: staticDuration, duration, distanceMeters, geometry removed — computed server-side.
 const validateRequest = (body) => {
-  const required = ['title', 'origin', 'destination', 'arriveBy', 'timezone', 'daysOfWeek', 'travelMode', 'staticDuration', 'city', 'countryCode'];
+  const required = ['title', 'origin', 'destination', 'arriveBy', 'timezone', 'daysOfWeek', 'travelMode'];
   const missing = required.filter(f => body[f] === undefined || body[f] === null || body[f] === '');
   if (missing.length > 0) return { error: `Missing required fields: ${missing.join(', ')}` };
 
@@ -73,9 +40,13 @@ const validateRequest = (body) => {
 
   const originError = validateWaypoint(body.origin, 'origin');
   if (originError) return { error: originError };
+  const originCityError = validateAddressComponents(body.origin, 'origin');
+  if (originCityError) return { error: originCityError };
 
   const destinationError = validateWaypoint(body.destination, 'destination');
   if (destinationError) return { error: destinationError };
+  const destinationCityError = validateAddressComponents(body.destination, 'destination');
+  if (destinationCityError) return { error: destinationCityError };
 
   if (body.intermediates) {
     if (!Array.isArray(body.intermediates)) return { error: 'intermediates must be an array' };
@@ -85,82 +56,58 @@ const validateRequest = (body) => {
     }
   }
 
-  const validDays = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
   if (!Array.isArray(body.daysOfWeek)) return { error: 'daysOfWeek must be an array' };
-  const invalidDays = body.daysOfWeek.filter(d => !validDays.includes(d));
+  const invalidDays = body.daysOfWeek.filter(d => !VALID_DAYS.includes(d));
   if (invalidDays.length > 0) return { error: `Invalid daysOfWeek: ${invalidDays.join(', ')}` };
 
-  const validModes = ['DRIVE', 'TRANSIT', 'WALK', 'TWO_WHEELER', 'BICYCLE'];
-  if (!validModes.includes(body.travelMode))
-    return { error: `Invalid travelMode: ${body.travelMode}. Must be one of ${validModes.join(', ')}` };
+  if (!VALID_TRAVEL_MODES.includes(body.travelMode))
+    return { error: `Invalid travelMode: ${body.travelMode}. Must be one of ${VALID_TRAVEL_MODES.join(', ')}` };
 
-  const staticDuration = parseDurationToMinutes(body.staticDuration);
-  if (staticDuration === null || staticDuration <= 0)
-    return { error: 'staticDuration must be a positive duration e.g. "1320s" or integer seconds' };
-
-  let trafficDuration;
-  if (body.duration !== undefined) {
-    trafficDuration = parseDurationToMinutes(body.duration);
-    if (trafficDuration === null || trafficDuration <= 0)
-      return { error: 'duration must be a positive duration e.g. "1320s" or integer seconds' };
-  }
-
-  // arriveBy is the user's LOCAL time intent — HH:MM in their timezone, not UTC
   const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
   if (!timeRegex.test(body.arriveBy)) return { error: 'arriveBy must be in HH:MM format (local time)' };
 
   if (!isValidIANATimezone(body.timezone))
     return { error: 'timezone must be a valid IANA timezone identifier e.g. "Europe/Dublin"' };
 
-  if (typeof body.city !== 'string' || body.city.trim() === '')
-    return { error: 'city must be a non-empty string' };
-  if (typeof body.countryCode !== 'string' || body.countryCode.trim() === '')
-    return { error: 'countryCode must be a non-empty string' };
-
-  return { error: null, staticDuration, trafficDuration };
+  return { error: null };
 };
 
-// Normalise a waypoint for storage — preserve Google's latLng structure, add label and placeId
-const normaliseWaypoint = (w) => ({
-  location: {
-    latLng: {
-      latitude: w.location.latLng.latitude,
-      longitude: w.location.latLng.longitude
+// ─── locationDB helper ────────────────────────────────────────────────────────
+// subdivisionCode is optional (ISO 3166-2 e.g. "IE-L") — only written when present.
+// Transitland feed discovery (transitlandFeedIds, gtfsRtAvailable) is owned entirely
+// by transitInitializer, which fires on the locationDB INSERT stream event.
+const buildLocationDBTransactItem = (cityKey, city, countryCode, subdivisionCode, cityLat, cityLng) => {
+  const setFields = [
+    'city = :city',
+    'countryCode = :cc',
+    ...(subdivisionCode ? ['subdivisionCode = :sc'] : []),
+    'cityLat = :lat',
+    'cityLng = :lng',
+    'active = :active',
+    'lastActiveAt = :ts',
+    'firstRegisteredAt = if_not_exists(firstRegisteredAt, :ts)'
+  ];
+  const exprValues = {
+    ':city': city,
+    ':cc': countryCode,
+    ...(subdivisionCode ? { ':sc': subdivisionCode } : {}),
+    ':lat': cityLat,
+    ':lng': cityLng,
+    ':active': true,
+    ':ts': new Date().toISOString(),
+    ':inc': 1
+  };
+  return {
+    Update: {
+      TableName: LOCATION_DB_TABLE,
+      Key: marshall({ cityKey }),
+      UpdateExpression: `SET ${setFields.join(', ')} ADD activeRouteCount :inc`,
+      ExpressionAttributeValues: marshall(exprValues)
     }
-  },
-  label: w.label,
-  ...(w.placeId ? { placeId: w.placeId } : {})
-});
+  };
+};
 
-// Build the locationDB Update transact item — atomic with ROUTE# and SCHEDULE# writes.
-// activeRouteCount incremented via ADD — no separate call, no drift.
-// cityLat/cityLng are origin coordinates — sufficient for city-level weather/event scraping.
-const buildLocationDBTransactItem = (cityKey, city, countryCode, cityLat, cityLng) => ({
-  Update: {
-    TableName: LOCATION_DB_TABLE,
-    Key: marshall({ cityKey }),
-    UpdateExpression: `
-      SET city = :city,
-          countryCode = :cc,
-          cityLat = :lat,
-          cityLng = :lng,
-          active = :active,
-          lastActiveAt = :ts,
-          firstRegisteredAt = if_not_exists(firstRegisteredAt, :ts)
-      ADD activeRouteCount :inc
-    `,
-    ExpressionAttributeValues: marshall({
-      ':city': city,
-      ':cc': countryCode,
-      ':lat': cityLat,
-      ':lng': cityLng,
-      ':active': true,
-      ':ts': new Date().toISOString(),
-      ':inc': 1
-    })
-  }
-});
-
+// ─── Handler ──────────────────────────────────────────────────────────────────
 exports.handler = async (event) => {
   console.log('routeCreate invoked');
 
@@ -176,16 +123,61 @@ exports.handler = async (event) => {
 
   const validation = validateRequest(body);
   if (validation.error) return response(400, { error: validation.error });
-  const { staticDuration, trafficDuration } = validation;
 
-  // City metadata from Android Places SDK — normalised for consistent cityKey format
-  const city = body.city.trim().toUpperCase().replace(/\s+/g, '_');
-  const countryCode = body.countryCode.trim().toUpperCase();
-  const cityKey = `${countryCode}#${city}`;
+  // ─── Routes API ─────────────────────────────────────────────────────────────
+  let apiKey;
+  try {
+    apiKey = await getRoutesApiKey();
+  } catch (err) {
+    console.error('Failed to fetch Routes API key from SSM:', err);
+    return response(500, { error: 'Internal server error' });
+  }
 
-  // Origin coordinates used as city centroid — no reverse geocoding needed
-  const cityLat = body.origin.location.latLng.latitude;
-  const cityLng = body.origin.location.latLng.longitude;
+  // Compute the target arrival UTC timestamp from the user's arriveBy intent.
+  // Passed to Google Routes API so it returns the correct service at the user's intended time:
+  // TRANSIT uses arrivalTime (latest departure meeting the constraint); others use departureTime.
+  const targetTimeUTC = computeArrivalUTC(body.arriveBy, body.timezone, body.daysOfWeek);
+
+  let routeData;
+  try {
+    routeData = await callWithRetry(
+      () => callRoutesApi(body.origin.placeId, body.destination.placeId, body.intermediates || [], body.travelMode, apiKey, targetTimeUTC),
+      3,
+      500
+    );
+  } catch (err) {
+    console.error('Routes API call failed:', err);
+    if (err.retryable === false && (err.status === 400 || err.status === 404)) {
+      return response(422, { error: 'Could not compute a route for the given waypoints. Check that the locations are valid and a route exists for the selected travel mode.' });
+    }
+    return response(503, { error: 'Route computation service unavailable. Please try again.' });
+  }
+
+  // Extract computed fields from Routes API response
+  const staticDuration = parseDurationToMinutes(routeData.staticDuration);
+  const trafficDuration = routeData.duration ? parseDurationToMinutes(routeData.duration) : undefined;
+  const distanceMeters = routeData.distanceMeters ?? null;
+  const geometry = { encodedPolyline: routeData.polyline.encodedPolyline };
+  // Steps are only requested and populated for TRANSIT routes.
+  // Other modes don't have transitDetails; the route-level polyline covers corridor matching.
+  const steps = body.travelMode === 'TRANSIT'
+    ? routeData.legs.flatMap(leg => leg.steps || [])
+    : [];
+
+  // Resolved coordinates from Routes API legs
+  const originLatLng = routeData.legs[0].startLocation.latLng;
+  const destinationLatLng = routeData.legs[routeData.legs.length - 1].endLocation.latLng;
+  const intermediateLatLngs = routeData.legs.slice(0, -1).map(leg => leg.endLocation.latLng);
+
+  // ─── Build city objects ──────────────────────────────────────────────────────
+  const originCityData = extractCityFromComponents(body.origin.addressComponents);
+  const cityOrigin = buildCityObject(originCityData.city, originCityData.countryCode, originLatLng.latitude, originLatLng.longitude, originCityData.subdivisionCode);
+  const destinationCityData = extractCityFromComponents(body.destination.addressComponents);
+  const cityDestination = buildCityObject(destinationCityData.city, destinationCityData.countryCode, destinationLatLng.latitude, destinationLatLng.longitude, destinationCityData.subdivisionCode);
+
+  // Intermediate city names are not available — Android provides city fields for origin/destination only.
+  // Intermediate coordinates are stored in the intermediates array via normaliseWaypoint.
+  const cityIntermediates = [];
 
   const routeId = randomUUID();
   const now = new Date().toISOString();
@@ -196,22 +188,23 @@ exports.handler = async (event) => {
     recordType: `ROUTE#${routeId}`,
     routeId,
     title: body.title,
-    city,
-    countryCode,
-    cityKey,
-    cityLat,
-    cityLng,
-    origin: normaliseWaypoint(body.origin),
-    intermediates: (body.intermediates || []).map(normaliseWaypoint),
-    destination: normaliseWaypoint(body.destination),
-    // geometry stores a scoped subset of Google's route response for map rendering and future ML:
-    // { encodedPolyline: string, legs: [...] }
-    // Stored as-is from Android, not consumed by the pipeline.
-    geometry: body.geometry || null,
+    cityOrigin,
+    cityDestination,
+    cityIntermediates,
+    cityKey: cityDestination.cityKey,
+    origin: normaliseWaypoint(body.origin, originLatLng),
+    intermediates: (body.intermediates || []).map((w, i) => normaliseWaypoint(w, intermediateLatLngs[i])),
+    destination: normaliseWaypoint(body.destination, destinationLatLng),
+    // geometry: encodedPolyline from Routes API for map rendering and future ML use.
+    // Stored as-is, not consumed by the delay pipeline.
+    geometry,
+    // steps: flattened across all legs. Used by delayWorker for transit line matching
+    // and roadworks corridor matching at step granularity.
+    steps,
     travelMode: body.travelMode,
     staticDuration,
     trafficDuration,
-    distanceMeters: body.distanceMeters || null,
+    distanceMeters,
     userActive: true,
     createdAt: now,
     updatedAt: now
@@ -232,8 +225,9 @@ exports.handler = async (event) => {
     ttl: scheduleTtl
   };
 
+  // ─── DynamoDB transaction ────────────────────────────────────────────────────
   try {
-    await client.send(new TransactWriteItemsCommand({
+    await dynamoClient.send(new TransactWriteItemsCommand({
       TransactItems: [
         // Item 0: atomically increment routeCount on PROFILE, enforcing the cap.
         // ConditionExpression is checked and ADD applied in a single atomic operation —
@@ -250,11 +244,11 @@ exports.handler = async (event) => {
         },
         { Put: { TableName: USER_ROUTE_TABLE, Item: marshall(routeItem, { removeUndefinedValues: true }) } },
         { Put: { TableName: USER_ROUTE_TABLE, Item: marshall(scheduleItem) } },
-        buildLocationDBTransactItem(cityKey, city, countryCode, cityLat, cityLng)
+        buildLocationDBTransactItem(cityDestination.cityKey, cityDestination.city, cityDestination.countryCode, cityDestination.subdivisionCode, cityDestination.lat, cityDestination.lng)
       ]
     }));
 
-    console.log(`Route created: userId=${userId} routeId=${routeId} city=${cityKey} tz=${body.timezone} arriveBy=${body.arriveBy} staticDuration=${staticDuration}mins`);
+    console.log(`Route created: userId=${userId} routeId=${routeId} city=${cityDestination.cityKey} tz=${body.timezone} arriveBy=${body.arriveBy} targetTimeUTC=${targetTimeUTC} staticDuration=${staticDuration}mins`);
 
     // Return full route shape — Android renders the card immediately without a second fetch
     return response(201, {
@@ -262,17 +256,19 @@ exports.handler = async (event) => {
       route: {
         routeId,
         title: routeItem.title,
-        city,
-        countryCode,
+        cityOrigin: routeItem.cityOrigin,
+        cityDestination: routeItem.cityDestination,
+        cityIntermediates: routeItem.cityIntermediates,
         userActive: true,
         origin: routeItem.origin,
         intermediates: routeItem.intermediates,
         destination: routeItem.destination,
         geometry: routeItem.geometry,
+        steps: routeItem.steps,
         travelMode: routeItem.travelMode,
         staticDuration,
         trafficDuration: trafficDuration ?? null,
-        distanceMeters: routeItem.distanceMeters,
+        distanceMeters,
         createdAt: now,
         updatedAt: now,
         schedule: {

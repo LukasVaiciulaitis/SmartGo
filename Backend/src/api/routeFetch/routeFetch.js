@@ -5,16 +5,10 @@
 
 const { DynamoDBClient, QueryCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
+const { response, MAX_ROUTES_PER_USER } = require('/opt/nodejs/utils');
 
 const client = new DynamoDBClient({});
 const USER_ROUTE_TABLE = process.env.USER_ROUTE_TABLE;
-const MAX_ROUTES_PER_USER = 20;
-
-const response = (statusCode, body) => ({
-  statusCode,
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(body)
-});
 
 exports.handler = async (event) => {
   console.log('routeFetch invoked');
@@ -63,13 +57,15 @@ exports.handler = async (event) => {
       return {
         routeId: route.routeId,
         title: route.title,
-        city: route.city,
-        countryCode: route.countryCode,
+        cityOrigin: route.cityOrigin,
+        cityDestination: route.cityDestination,
+        cityIntermediates: route.cityIntermediates || [],
         userActive: route.userActive ?? true,
         origin: route.origin,
         intermediates: route.intermediates || [],
         destination: route.destination,
         geometry: route.geometry || null,
+        steps: route.steps || [],
         travelMode: route.travelMode,
         staticDuration: route.staticDuration,
         trafficDuration: route.trafficDuration ?? null,

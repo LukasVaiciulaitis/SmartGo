@@ -3,8 +3,5 @@
   "version": "1.0.0",
   "description": "GET /routes/fetch — returns all routes, schedules and forecasts for a user",
   "main": "routeFetch.js",
-  "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/util-dynamodb": "^3.0.0"
-  }
+  "dependencies": {}
 }
