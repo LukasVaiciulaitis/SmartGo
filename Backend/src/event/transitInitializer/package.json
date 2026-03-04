@@ -1,0 +1,9 @@
+{
+  "name": "transit-initializer",
+  "version": "1.0.0",
+  "description": "Stream-triggered Lambda — ingests GTFS static stops and routes into transitDB when a city is added",
+  "main": "transitInitializer.js",
+  "dependencies": {
+    "adm-zip": "^0.5.16"
+  }
+}
