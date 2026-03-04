@@ -1,4 +1,4 @@
-// postConfirmation — Cognito post-confirmation trigger
+// profileCreate — Cognito post-confirmation trigger
 // Fires once, synchronously, after a user successfully verifies their email.
 // Writes a PROFILE record to userRouteDB.
 // Throwing causes Cognito to surface a registration failure to the app — user must retry.
@@ -11,7 +11,7 @@ const client = new DynamoDBClient({});
 const USER_ROUTE_TABLE = process.env.USER_ROUTE_TABLE;
 
 exports.handler = async (event) => {
-  console.log('postConfirmation invoked', JSON.stringify(event));
+  console.log('profileCreate invoked', { userId: event.request?.userAttributes?.sub, trigger: event.triggerSource });
 
   // Cognito passes the user's sub and email in the request
   const userId = event.request?.userAttributes?.sub;
@@ -20,7 +20,7 @@ exports.handler = async (event) => {
   if (!userId || !email) {
     // Should never happen — Cognito always provides these on post-confirmation
     // Throw to block registration and surface a clear error
-    throw new Error('postConfirmation: missing userId or email in Cognito event — registration blocked');
+    throw new Error('profileCreate: missing userId or email in Cognito event — registration blocked');
   }
 
   const now = new Date().toISOString();
@@ -49,7 +49,7 @@ exports.handler = async (event) => {
       console.warn(`PROFILE already exists for userId=${userId} — skipping write`);
     } else {
       // DynamoDB unavailable or unexpected error — throw to block registration
-      console.error('postConfirmation error:', err);
+      console.error('profileCreate error:', err);
       throw err;
     }
   }

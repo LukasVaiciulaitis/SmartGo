@@ -1,0 +1,7 @@
+{
+  "name": "profile-create",
+  "version": "1.0.0",
+  "description": "Cognito post-confirmation trigger — writes PROFILE record to userRouteDB",
+  "main": "profileCreate.js",
+  "dependencies": {}
+}
