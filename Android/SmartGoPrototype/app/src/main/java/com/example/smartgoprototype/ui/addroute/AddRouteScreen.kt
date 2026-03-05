@@ -2,17 +2,19 @@ package com.example.smartgoprototype.ui.addroute
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
@@ -27,8 +29,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TimePicker
+import androidx.compose.material3.TimeInput
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -37,8 +38,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.input.ImeAction
 import com.example.smartgoprototype.domain.model.PlaceLocation
 import com.example.smartgoprototype.domain.model.TravelMode
 import java.time.DayOfWeek
@@ -60,10 +64,15 @@ fun AddRouteScreen(
 ) {
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
-    var showTimePicker by remember { mutableStateOf(false) }
 
     // Local error channel for picker errors so it can be compiled without ViewModel hooks
     var localError by remember { mutableStateOf<String?>(null) }
+
+    val arriveByState = rememberTimePickerState(
+        initialHour = uiState.arriveBy.hour,
+        initialMinute = uiState.arriveBy.minute,
+        is24Hour = true
+    )
 
     LaunchedEffect(uiState.errorMessage) {
         uiState.errorMessage?.let { snackbarHostState.showSnackbar(it) }
@@ -73,6 +82,12 @@ fun AddRouteScreen(
         localError?.let {
             snackbarHostState.showSnackbar(it)
             localError = null
+        }
+    }
+
+    LaunchedEffect(arriveByState.hour, arriveByState.minute) {
+        if (arriveByState.hour != uiState.arriveBy.hour || arriveByState.minute != uiState.arriveBy.minute) {
+            onArriveByChange(arriveByState.hour, arriveByState.minute)
         }
     }
 
@@ -126,24 +141,6 @@ fun AddRouteScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-
-            TravelModePicker(
-                selected = uiState.travelMode,
-                onSelected = onTravelModeSelected
-            )
-
-            PlaceField(
-                label = "Origin",
-                value = uiState.origin?.label,
-                onPick = originPicker
-            )
-
-            PlaceField(
-                label = "Destination",
-                value = uiState.destination?.label,
-                onPick = destinationPicker
-            )
-
             OutlinedTextField(
                 value = uiState.title,
                 onValueChange = onTitleChange,
@@ -151,22 +148,32 @@ fun AddRouteScreen(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
-            TextButton(onClick = { showTimePicker = true }) { Text("Change time") }
+
+            PlaceField(
+                label = "Origin",
+                value = uiState.origin?.label,
+                placeholder = "Search origin",
+                onPick = originPicker
+            )
+
+            PlaceField(
+                label = "Destination",
+                value = uiState.destination?.label,
+                placeholder = "Search destination",
+                onPick = destinationPicker
+            )
+
+            ArriveByTimeInput(
+                state = arriveByState
+            )
+
+            TravelModePicker(
+                selected = uiState.travelMode,
+                onSelected = onTravelModeSelected
+            )
 
             DaysOfWeekChips(selected = uiState.activeDays, onToggle = onToggleDay)
         }
-    }
-
-    if (showTimePicker) {
-        ArriveByTimePickerDialog(
-            initialHour = uiState.arriveBy.hour,
-            initialMinute = uiState.arriveBy.minute,
-            onDismiss = { showTimePicker = false },
-            onConfirm = { h, m ->
-                onArriveByChange(h, m)
-                showTimePicker = false
-            }
-        )
     }
 }
 
@@ -174,23 +181,40 @@ fun AddRouteScreen(
 private fun PlaceField(
     label: String,
     value: String?,
+    placeholder: String,
     onPick: () -> Unit
 ) {
-    Column(Modifier.fillMaxWidth()) {
-        Text(label, style = MaterialTheme.typography.labelLarge)
-        Spacer(Modifier.height(6.dp))
-        Surface(shape = MaterialTheme.shapes.medium, tonalElevation = 1.dp) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(value ?: "Tap to select", style = MaterialTheme.typography.bodyLarge)
-                TextButton(onClick = onPick) { Text("Pick") }
+    var hasLaunchedFromFocus by remember { mutableStateOf(false) }
+
+    OutlinedTextField(
+        value = value.orEmpty(),
+        onValueChange = {
+            // User intent to type/search triggers Places autocomplete.
+            onPick()
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .onFocusChanged { focusState ->
+                if (focusState.isFocused && !hasLaunchedFromFocus) {
+                    hasLaunchedFromFocus = true
+                    onPick()
+                } else if (!focusState.isFocused) {
+                    hasLaunchedFromFocus = false
+                }
+            },
+        label = { Text(label) },
+        placeholder = { Text(placeholder) },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        trailingIcon = {
+            IconButton(onClick = onPick) {
+                Icon(
+                    imageVector = Icons.Default.Search,
+                    contentDescription = "Search $label"
+                )
             }
         }
-    }
+    )
 }
 
 @Composable
@@ -201,15 +225,30 @@ private fun TravelModePicker(
     Column(Modifier.fillMaxWidth()) {
         Text("Travel mode", style = MaterialTheme.typography.labelLarge)
         Spacer(Modifier.height(8.dp))
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            val modeLabels = mapOf(
+                TravelMode.DRIVE to "Drive",
+                TravelMode.TRANSIT to "Transit",
+                TravelMode.WALK to "Walk",
+                TravelMode.TWO_WHEELER to "2W",
+                TravelMode.BICYCLE to "Bike"
+            )
             TravelMode.values().forEach { mode ->
                 FilterChip(
+                    modifier = Modifier.weight(1f),
                     selected = selected == mode,
                     onClick = { onSelected(mode) },
-                    label = { Text(mode.name.replace('_', ' ')) }
+                    label = {
+                        Text(
+                            text = modeLabels[mode] ?: mode.name.replace('_', ' '),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
                 )
             }
         }
@@ -218,29 +257,14 @@ private fun TravelModePicker(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ArriveByTimePickerDialog(
-    initialHour: Int,
-    initialMinute: Int,
-    onDismiss: () -> Unit,
-    onConfirm: (hour: Int, minute: Int) -> Unit
+private fun ArriveByTimeInput(
+    state: androidx.compose.material3.TimePickerState
 ) {
-    val state = rememberTimePickerState(
-        initialHour = initialHour,
-        initialMinute = initialMinute,
-        is24Hour = true
-    )
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Select arrive-by time") },
-        text = { TimePicker(state = state) },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(state.hour, state.minute) }) { Text("OK") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
-    )
+    Column(Modifier.fillMaxWidth()) {
+        Text("Arrive by", style = MaterialTheme.typography.labelLarge)
+        Spacer(Modifier.height(6.dp))
+        TimeInput(state = state)
+    }
 }
 
 @Composable
@@ -251,9 +275,9 @@ private fun DaysOfWeekChips(
     Column(Modifier.fillMaxWidth()) {
         Text("Active days", style = MaterialTheme.typography.labelLarge)
         Spacer(Modifier.height(8.dp))
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             DayOfWeek.values().forEach { day ->
                 FilterChip(

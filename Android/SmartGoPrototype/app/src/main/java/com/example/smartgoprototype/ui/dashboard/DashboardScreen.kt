@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.smartgoprototype.domain.model.Route
+import java.time.DayOfWeek
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterialApi::class)
 @Composable
@@ -100,21 +101,111 @@ fun DashboardScreen(
 
 @Composable
 private fun RoutesList(routes: List<Route>, modifier: Modifier = Modifier) {
-    LazyColumn(modifier = modifier) {
+    LazyColumn(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
         items(routes) { route ->
             RouteItem(route)
-            Divider()
         }
     }
 }
 
 @Composable
 private fun RouteItem(route: Route) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        Text(
-            route.title,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold
-        )
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                route.title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = formatDepartureTime(route.schedule.arriveByMinutes),
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(Modifier.width(10.dp))
+                DaysRow(
+                    activeDays = route.schedule.activeDays,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.width(10.dp))
+                Switch(
+                    checked = true,
+                    onCheckedChange = { }
+                )
+            }
+        }
     }
+}
+
+@Composable
+private fun DaysRow(
+    activeDays: Set<DayOfWeek>,
+    modifier: Modifier = Modifier
+) {
+    val orderedDays = listOf(
+        DayOfWeek.MONDAY to "M",
+        DayOfWeek.TUESDAY to "T",
+        DayOfWeek.WEDNESDAY to "W",
+        DayOfWeek.THURSDAY to "T",
+        DayOfWeek.FRIDAY to "F",
+        DayOfWeek.SATURDAY to "S",
+        DayOfWeek.SUNDAY to "S"
+    )
+
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        orderedDays.forEach { (day, label) ->
+            val isActive = activeDays.contains(day)
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = if (isActive) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+                contentColor = if (isActive) {
+                    MaterialTheme.colorScheme.onPrimary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(24.dp)
+                        .padding(vertical = 5.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatDepartureTime(totalMinutes: Int): String {
+    val hour = (totalMinutes / 60).coerceIn(0, 23)
+    val minute = (totalMinutes % 60).coerceIn(0, 59)
+    return "%02d:%02d".format(hour, minute)
 }
