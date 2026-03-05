@@ -7,49 +7,43 @@
 
 const { DynamoDBClient, ScanCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
-const { batchWrite } = require('/opt/nodejs/utils');
-const https = require('https');
+const { batchWrite, DAY_MAP, fetchHttpJson, callWithRetry } = require('/opt/nodejs/utils');
 
 const client = new DynamoDBClient({});
 const DELAYS_TABLE = process.env.DELAYS_TABLE;
 const LOCATION_DB_TABLE = process.env.LOCATION_DB_TABLE;
 
-const DAY_MAP = { 0: 'SUN', 1: 'MON', 2: 'TUE', 3: 'WED', 4: 'THU', 5: 'FRI', 6: 'SAT' };
-
-// Fetch full 7-day hourly forecast from Open-Meteo for a city centroid
-// timezone=UTC ensures hours are returned in UTC — delayWorker applies user timezone if needed
+// Fetch full 7-day hourly forecast from Open-Meteo for a city centroid.
+// timezone=UTC ensures hours are returned in UTC — delayWorker applies user timezone if needed.
+// Variables fetched:
+//   precipitation  — total wet precipitation (rain + showers + snowfall), mm
+//   snowfall       — snowfall amount, cm (separate from precipitation for explicit snow detection)
+//   wind_speed_10m — wind speed at 10m height, km/h
+//   weather_code   — WMO weather interpretation code (used to detect fog: codes 45, 48)
+// Retried up to 3× with exponential backoff via callWithRetry — handles transient 5xx / timeouts.
 const fetchWeatherForecast = (lat, lng) => {
-  return new Promise((resolve, reject) => {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&hourly=precipitation&timezone=UTC&forecast_days=8`;
-    const req = https.get(url, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch (e) {
-          reject(new Error(`Failed to parse Open-Meteo response for lat=${lat} lng=${lng}`));
-        }
-      });
-      res.on('error', reject);
-    });
-    req.on('error', reject);
-    req.setTimeout(10000, () => {
-      req.destroy();
-      reject(new Error(`Open-Meteo request timed out for lat=${lat} lng=${lng}`));
-    });
-  });
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&hourly=precipitation,snowfall,wind_speed_10m,weather_code&timezone=UTC&forecast_days=8`;
+  return callWithRetry(() => fetchHttpJson(url));
 };
 
-// Extract full 24-hour hourly precipitation array for a given date
-// Returns array of { hour: "HH", precipitationMm: N } for all 24 hours
+// Extract full 24-hour hourly weather array for a given date
+// Returns array of { hour: "HH", precipitationMm, snowfallCm, windspeedKph, weatherCode }
 const extractHourlyData = (hourlyData, dateStr) => {
   return hourlyData.time
-    .map((t, i) => ({ time: t, precipitationMm: hourlyData.precipitation[i] }))
+    .map((t, i) => ({
+      time: t,
+      precipitationMm: hourlyData.precipitation[i],
+      snowfallCm: hourlyData.snowfall[i],
+      windspeedKph: hourlyData.wind_speed_10m[i],
+      weatherCode: hourlyData.weather_code[i]
+    }))
     .filter(h => h.time.startsWith(dateStr))
     .map(h => ({
       hour: h.time.split('T')[1].substring(0, 2),
-      precipitationMm: Math.round(h.precipitationMm * 10) / 10
+      precipitationMm: Math.round(h.precipitationMm * 10) / 10,
+      snowfallCm: Math.round(h.snowfallCm * 10) / 10,
+      windspeedKph: Math.round(h.windspeedKph * 10) / 10,
+      weatherCode: h.weatherCode
     }));
 };
 
@@ -91,6 +85,7 @@ exports.handler = async (event) => {
 
     // Build all DynamoDB write requests
     const writeRequests = [];
+    const generatedAt = new Date().toISOString();
 
     for (const { city, forecast } of cityForecasts) {
       if (!forecast) continue;
@@ -114,7 +109,7 @@ exports.handler = async (event) => {
               dayOfWeek,
               hourly,
               ttl,
-              generatedAt: new Date().toISOString()
+              generatedAt
             })
           }
         });
