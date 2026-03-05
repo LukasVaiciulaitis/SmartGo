@@ -1,0 +1,9 @@
+{
+  "name": "transit-scraper",
+  "version": "1.0.0",
+  "description": "Nightly scraper — fetches GTFS-RT service alerts per active city and writes TRANSIT# records to delaysDB",
+  "main": "transitScraper.js",
+  "dependencies": {
+    "gtfs-realtime-bindings": "^1.1.1"
+  }
+}
