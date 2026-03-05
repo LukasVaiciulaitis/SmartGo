@@ -3,8 +3,5 @@
   "version": "1.0.0",
   "description": "Nightly scraper — fetches hourly weather per active city from Open-Meteo",
   "main": "weatherScraper.js",
-  "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/util-dynamodb": "^3.0.0"
-  }
+  "dependencies": {}
 }
