@@ -1,0 +1,7 @@
+{
+  "name": "holiday-scraper",
+  "version": "1.0.0",
+  "description": "Nightly scraper — fetches public holidays per active city from Nager.Date and writes HOLIDAY# records to delaysDB",
+  "main": "holidayScraper.js",
+  "dependencies": {}
+}
