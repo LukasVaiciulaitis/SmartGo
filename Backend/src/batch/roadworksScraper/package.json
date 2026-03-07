@@ -1,0 +1,7 @@
+{
+  "name": "roadworks-scraper",
+  "version": "1.0.0",
+  "description": "Nightly scraper — fetches planned Road Works incidents per active city from TomTom",
+  "main": "roadworksScraper.js",
+  "dependencies": {}
+}
