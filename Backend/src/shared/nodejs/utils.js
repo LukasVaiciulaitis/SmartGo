@@ -460,7 +460,8 @@ const discoverTransitlandFeedIds = async (searchTerms, apiKey) => {
   await Promise.all(searchTerms.map(async (term) => {
     try {
       const res = await fetch(
-        `https://transit.land/api/v2/rest/operators?search=${encodeURIComponent(term)}&per_page=5&apikey=${apiKey}`
+        `https://transit.land/api/v2/rest/operators?search=${encodeURIComponent(term)}&per_page=5`,
+        { headers: { apikey: apiKey } }
       );
       if (!res.ok) return;
       const data = await res.json();
@@ -482,7 +483,8 @@ const discoverTransitlandFeedIds = async (searchTerms, apiKey) => {
   const probeResults = await Promise.all([...candidateFeedIds].map(async (feedId) => {
     try {
       const res = await fetch(
-        `https://transit.land/api/v2/rest/feeds/${feedId}/download_latest_rt/alerts.json?apikey=${apiKey}`
+        `https://transit.land/api/v2/rest/feeds/${feedId}/download_latest_rt/alerts.json`,
+        { headers: { apikey: apiKey } }
       );
       return res.ok ? feedId : null;
     } catch { return null; }

@@ -92,12 +92,12 @@ exports.handler = async (event) => {
         const routeAlerts = [];
 
         for (const feedId of city.transitlandFeedIds) {
-          const url = `https://transit.land/api/v2/rest/feeds/${feedId}/download_latest_rt/alerts.json?apikey=${apiKey}`;
+          const url = `https://transit.land/api/v2/rest/feeds/${feedId}/download_latest_rt/alerts.json`;
 
           let data;
           try {
             data = await callWithRetry(async () => {
-              const res = await fetch(url);
+              const res = await fetch(url, { headers: { apikey: apiKey } });
               if (!res.ok) {
                 const err = new Error(`HTTP ${res.status} from Transitland feed ${feedId} for ${city.cityKey}`);
                 err.retryable = res.status >= 500;
