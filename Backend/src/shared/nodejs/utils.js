@@ -176,6 +176,22 @@ const response = (statusCode, body) => ({
   body: JSON.stringify(body)
 });
 
+// ─── Request helpers ──────────────────────────────────────────────────────────
+
+// Extract the authenticated user's ID from the Cognito authorizer context.
+// Returns null when the token is absent or invalid (caller should return 401).
+const getUserId = (event) => event.requestContext?.authorizer?.claims?.sub ?? null;
+
+// Parse the Lambda event body as JSON.
+// Returns { body, parseError } — if parseError is non-null, return it directly from the handler.
+const parseBody = (event) => {
+  try {
+    return { body: JSON.parse(event.body || '{}'), parseError: null };
+  } catch {
+    return { body: null, parseError: response(400, { error: 'Invalid JSON in request body' }) };
+  }
+};
+
 // ─── Route Constants ──────────────────────────────────────────────────────────
 
 const MAX_ROUTES_PER_USER = 20;
@@ -369,9 +385,11 @@ const decodePolyline = (encoded) => {
   return points;
 };
 
-// ─── UUID ─────────────────────────────────────────────────────────────────────
+// ─── UUID / common regexes ────────────────────────────────────────────────────
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// HH:MM local time — used by routeCreate and routeUpdate validation
+const ARRIVE_BY_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 // ─── Routes API ───────────────────────────────────────────────────────────────
 
@@ -524,6 +542,33 @@ const callRoutesApi = async (originPlaceId, destinationPlaceId, intermediates, t
   return route;
 };
 
+// Convenience wrapper for routeCreate and routeUpdate.
+// Fetches the SSM API key, calls the Routes API with retry, and maps errors to ready-made
+// Lambda responses. Returns { data: routeData, errorResponse: null } on success, or
+// { data: null, errorResponse } where errorResponse can be returned directly from the handler.
+const computeRoute = async (originPlaceId, destPlaceId, intermediates, travelMode, targetTimeUTC) => {
+  let apiKey;
+  try {
+    apiKey = await getRoutesApiKey();
+  } catch (err) {
+    console.error('Failed to fetch Routes API key from SSM:', err);
+    return { data: null, errorResponse: response(500, { error: 'Internal server error' }) };
+  }
+  try {
+    const data = await callWithRetry(
+      () => callRoutesApi(originPlaceId, destPlaceId, intermediates, travelMode, apiKey, targetTimeUTC),
+      3, 500
+    );
+    return { data, errorResponse: null };
+  } catch (err) {
+    console.error('Routes API call failed:', err);
+    if (err.retryable === false && (err.status === 400 || err.status === 404)) {
+      return { data: null, errorResponse: response(422, { error: 'Could not compute a route for the given waypoints. Check that the locations are valid and a route exists for the selected travel mode.' }) };
+    }
+    return { data: null, errorResponse: response(503, { error: 'Route computation service unavailable. Please try again.' }) };
+  }
+};
+
 // ─── Waypoint ─────────────────────────────────────────────────────────────────
 
 // Normalise a waypoint for storage.
@@ -541,4 +586,4 @@ const normaliseWaypoint = (w, resolvedLatLng) => ({
   placeId: w.placeId
 });
 
-module.exports = { chunkArray, parseDurationToMinutes, batchGet, batchWrite, callWithRetry, fetchHttpJson, response, MAX_ROUTES_PER_USER, VALID_DAYS, VALID_TRAVEL_MODES, DAY_MAP, isValidIANATimezone, computeArrivalUTC, validateWaypoint, validateAddressComponents, extractCityFromComponents, buildCityObject, normaliseWaypoint, getDistanceKm, decodePolyline, UUID_REGEX, getRoutesApiKey, callRoutesApi, getTransitlandApiKey, discoverTransitlandFeedIds };
+module.exports = { chunkArray, parseDurationToMinutes, batchGet, batchWrite, callWithRetry, fetchHttpJson, response, getUserId, parseBody, MAX_ROUTES_PER_USER, VALID_DAYS, VALID_TRAVEL_MODES, DAY_MAP, isValidIANATimezone, computeArrivalUTC, ARRIVE_BY_REGEX, validateWaypoint, validateAddressComponents, extractCityFromComponents, buildCityObject, normaliseWaypoint, getDistanceKm, decodePolyline, UUID_REGEX, getRoutesApiKey, callRoutesApi, computeRoute, getTransitlandApiKey, discoverTransitlandFeedIds };

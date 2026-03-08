@@ -6,7 +6,7 @@
 
 const { DynamoDBClient, GetItemCommand, DeleteItemCommand, UpdateItemCommand, TransactWriteItemsCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
-const { response, UUID_REGEX } = require('/opt/nodejs/utils');
+const { response, getUserId, parseBody, UUID_REGEX } = require('/opt/nodejs/utils');
 
 const client = new DynamoDBClient({});
 const USER_ROUTE_TABLE = process.env.USER_ROUTE_TABLE;
@@ -15,15 +15,11 @@ const LOCATION_DB_TABLE = process.env.LOCATION_DB_TABLE;
 exports.handler = async (event) => {
   console.log('routeDelete invoked');
 
-  const userId = event.requestContext?.authorizer?.claims?.sub;
+  const userId = getUserId(event);
   if (!userId) return response(401, { error: 'Unauthorised - no valid token' });
 
-  let body;
-  try {
-    body = JSON.parse(event.body || '{}');
-  } catch {
-    return response(400, { error: 'Invalid JSON in request body' });
-  }
+  const { body, parseError } = parseBody(event);
+  if (parseError) return parseError;
 
   const { routeId } = body;
   if (!routeId) return response(400, { error: 'routeId is required in request body' });

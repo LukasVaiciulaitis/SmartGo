@@ -5,7 +5,7 @@
 
 const { DynamoDBClient, QueryCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
-const { response, MAX_ROUTES_PER_USER } = require('/opt/nodejs/utils');
+const { response, getUserId, MAX_ROUTES_PER_USER } = require('/opt/nodejs/utils');
 
 const client = new DynamoDBClient({});
 const USER_ROUTE_TABLE = process.env.USER_ROUTE_TABLE;
@@ -13,7 +13,7 @@ const USER_ROUTE_TABLE = process.env.USER_ROUTE_TABLE;
 exports.handler = async (event) => {
   console.log('routeFetch invoked');
 
-  const userId = event.requestContext?.authorizer?.claims?.sub;
+  const userId = getUserId(event);
   if (!userId) return response(401, { error: 'Unauthorised - no valid token' });
 
   try {
@@ -26,6 +26,8 @@ exports.handler = async (event) => {
         TableName: USER_ROUTE_TABLE,
         KeyConditionExpression: 'userId = :uid',
         ExpressionAttributeValues: marshall({ ':uid': userId }),
+        // Exclude `steps` — large TRANSIT stop data only needed by delayWorker, not this response
+        ProjectionExpression: 'userId, recordType, routeId, title, cityOrigin, cityDestination, cityIntermediates, userActive, origin, intermediates, destination, geometry, travelMode, staticDuration, trafficDuration, distanceMeters, createdAt, updatedAt, arriveBy, timezone, daysOfWeek, days, generatedAt, email',
         ExclusiveStartKey: lastEvaluatedKey
       }));
 
@@ -39,13 +41,19 @@ exports.handler = async (event) => {
       createdAt: rawProfile.createdAt
     } : null;
     const routes = allItems.filter(i => i.recordType.startsWith('ROUTE#'));
-    const schedules = allItems.filter(i => i.recordType.startsWith('SCHEDULE#'));
-    const forecasts = allItems.filter(i => i.recordType.startsWith('FORECAST#'));
+
+    // Build lookup maps — O(n) vs O(n²) for the find() calls inside routes.map()
+    const scheduleMap = new Map(
+      allItems.filter(i => i.recordType.startsWith('SCHEDULE#')).map(s => [s.routeId, s])
+    );
+    const forecastMap = new Map(
+      allItems.filter(i => i.recordType.startsWith('FORECAST#')).map(f => [f.routeId, f])
+    );
 
     // Build response — one entry per route with schedule and forecast attached
     const routeData = routes.map(route => {
-      const schedule = schedules.find(s => s.routeId === route.routeId) || null;
-      const forecast = forecasts.find(f => f.routeId === route.routeId) || null;
+      const schedule = scheduleMap.get(route.routeId) || null;
+      const forecast = forecastMap.get(route.routeId) || null;
 
       // forecastStatus communicates forecast state to Android:
       //   active  — forecast present and up to date

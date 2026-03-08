@@ -19,10 +19,10 @@
 //   This means forecasts are always correct regardless of DST transitions —
 //   a user who sets 08:45 always gets a forecast for 08:45 local, winter or summer
 
-const { DynamoDBClient, TransactWriteItemsCommand } = require('@aws-sdk/client-dynamodb');
-const { marshall } = require('@aws-sdk/util-dynamodb');
+const { DynamoDBClient, GetItemCommand, TransactWriteItemsCommand } = require('@aws-sdk/client-dynamodb');
+const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
 const { randomUUID } = require('crypto');
-const { parseDurationToMinutes, callWithRetry, response, MAX_ROUTES_PER_USER, VALID_DAYS, VALID_TRAVEL_MODES, isValidIANATimezone, computeArrivalUTC, validateWaypoint, validateAddressComponents, extractCityFromComponents, buildCityObject, normaliseWaypoint, getRoutesApiKey, callRoutesApi } = require('/opt/nodejs/utils');
+const { parseDurationToMinutes, response, getUserId, parseBody, MAX_ROUTES_PER_USER, VALID_DAYS, VALID_TRAVEL_MODES, isValidIANATimezone, computeArrivalUTC, ARRIVE_BY_REGEX, validateWaypoint, validateAddressComponents, extractCityFromComponents, buildCityObject, normaliseWaypoint, computeRoute } = require('/opt/nodejs/utils');
 
 const dynamoClient = new DynamoDBClient({});
 const USER_ROUTE_TABLE = process.env.USER_ROUTE_TABLE;
@@ -36,6 +36,7 @@ const validateRequest = (body) => {
   const missing = required.filter(f => body[f] === undefined || body[f] === null || body[f] === '');
   if (missing.length > 0) return { error: `Missing required fields: ${missing.join(', ')}` };
 
+  if (typeof body.title !== 'string') return { error: 'title must be a string' };
   if (body.title.length > 48) return { error: 'title must not exceed 48 characters' };
 
   const originError = validateWaypoint(body.origin, 'origin');
@@ -50,6 +51,7 @@ const validateRequest = (body) => {
 
   if (body.intermediates) {
     if (!Array.isArray(body.intermediates)) return { error: 'intermediates must be an array' };
+    if (body.intermediates.length > 25) return { error: 'Maximum 25 intermediates allowed' }; // matches Google Routes API hard limit
     for (let i = 0; i < body.intermediates.length; i++) {
       const err = validateWaypoint(body.intermediates[i], `intermediates[${i}]`);
       if (err) return { error: err };
@@ -59,12 +61,12 @@ const validateRequest = (body) => {
   if (!Array.isArray(body.daysOfWeek)) return { error: 'daysOfWeek must be an array' };
   const invalidDays = body.daysOfWeek.filter(d => !VALID_DAYS.includes(d));
   if (invalidDays.length > 0) return { error: `Invalid daysOfWeek: ${invalidDays.join(', ')}` };
+  if (new Set(body.daysOfWeek).size !== body.daysOfWeek.length) return { error: 'daysOfWeek must not contain duplicate entries' };
 
   if (!VALID_TRAVEL_MODES.includes(body.travelMode))
     return { error: `Invalid travelMode: ${body.travelMode}. Must be one of ${VALID_TRAVEL_MODES.join(', ')}` };
 
-  const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
-  if (!timeRegex.test(body.arriveBy)) return { error: 'arriveBy must be in HH:MM format (local time)' };
+  if (!ARRIVE_BY_REGEX.test(body.arriveBy)) return { error: 'arriveBy must be in HH:MM format (local time)' };
 
   if (!isValidIANATimezone(body.timezone))
     return { error: 'timezone must be a valid IANA timezone identifier e.g. "Europe/Dublin"' };
@@ -111,47 +113,44 @@ const buildLocationDBTransactItem = (cityKey, city, countryCode, subdivisionCode
 exports.handler = async (event) => {
   console.log('routeCreate invoked');
 
-  const userId = event.requestContext?.authorizer?.claims?.sub;
+  const userId = getUserId(event);
   if (!userId) return response(401, { error: 'Unauthorised - no valid token' });
 
-  let body;
-  try {
-    body = JSON.parse(event.body || '{}');
-  } catch {
-    return response(400, { error: 'Invalid JSON in request body' });
-  }
+  const { body, parseError } = parseBody(event);
+  if (parseError) return parseError;
 
   const validation = validateRequest(body);
   if (validation.error) return response(400, { error: validation.error });
 
-  // ─── Routes API ─────────────────────────────────────────────────────────────
-  let apiKey;
+  // ─── Pre-flight limit check ───────────────────────────────────────────────
+  // Read routeCount before the expensive Routes API call — avoids a wasted external
+  // round-trip when the user is already at the cap. The atomic transaction below is
+  // still the authoritative enforcement; this is just an early-exit optimisation.
   try {
-    apiKey = await getRoutesApiKey();
+    const profileResult = await dynamoClient.send(new GetItemCommand({
+      TableName: USER_ROUTE_TABLE,
+      Key: marshall({ userId, recordType: 'PROFILE' }),
+      ProjectionExpression: 'routeCount'
+    }));
+    const currentCount = profileResult.Item ? (unmarshall(profileResult.Item).routeCount ?? 0) : 0;
+    if (currentCount >= MAX_ROUTES_PER_USER) {
+      return response(400, { error: `Maximum of ${MAX_ROUTES_PER_USER} routes allowed per user. Delete an existing route to create a new one.` });
+    }
   } catch (err) {
-    console.error('Failed to fetch Routes API key from SSM:', err);
-    return response(500, { error: 'Internal server error' });
+    // Non-fatal — proceed and let the transaction enforce the cap atomically
+    console.warn('Pre-flight routeCount check failed, proceeding to transaction:', err.message);
   }
 
+  // ─── Routes API ─────────────────────────────────────────────────────────────
   // Compute the target arrival UTC timestamp from the user's arriveBy intent.
   // Passed to Google Routes API so it returns the correct service at the user's intended time:
   // TRANSIT uses arrivalTime (latest departure meeting the constraint); others use departureTime.
   const targetTimeUTC = computeArrivalUTC(body.arriveBy, body.timezone, body.daysOfWeek);
 
-  let routeData;
-  try {
-    routeData = await callWithRetry(
-      () => callRoutesApi(body.origin.placeId, body.destination.placeId, body.intermediates || [], body.travelMode, apiKey, targetTimeUTC),
-      3,
-      500
-    );
-  } catch (err) {
-    console.error('Routes API call failed:', err);
-    if (err.retryable === false && (err.status === 400 || err.status === 404)) {
-      return response(422, { error: 'Could not compute a route for the given waypoints. Check that the locations are valid and a route exists for the selected travel mode.' });
-    }
-    return response(503, { error: 'Route computation service unavailable. Please try again.' });
-  }
+  const { data: routeData, errorResponse } = await computeRoute(
+    body.origin.placeId, body.destination.placeId, body.intermediates || [], body.travelMode, targetTimeUTC
+  );
+  if (errorResponse) return errorResponse;
 
   // Extract computed fields from Routes API response
   const staticDuration = parseDurationToMinutes(routeData.staticDuration);

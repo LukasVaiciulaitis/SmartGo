@@ -18,7 +18,7 @@
 
 const { DynamoDBClient, GetItemCommand, BatchGetItemCommand, TransactWriteItemsCommand, DeleteItemCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
-const { parseDurationToMinutes, callWithRetry, response, VALID_DAYS, VALID_TRAVEL_MODES, isValidIANATimezone, computeArrivalUTC, validateWaypoint, validateAddressComponents, extractCityFromComponents, buildCityObject, normaliseWaypoint, UUID_REGEX, getRoutesApiKey, callRoutesApi } = require('/opt/nodejs/utils');
+const { parseDurationToMinutes, response, getUserId, parseBody, VALID_DAYS, VALID_TRAVEL_MODES, isValidIANATimezone, computeArrivalUTC, ARRIVE_BY_REGEX, validateWaypoint, validateAddressComponents, extractCityFromComponents, buildCityObject, normaliseWaypoint, UUID_REGEX, computeRoute } = require('/opt/nodejs/utils');
 
 const dynamoClient = new DynamoDBClient({});
 const TABLE = process.env.USER_ROUTE_TABLE;
@@ -46,15 +46,11 @@ const buildUpdateExpression = (fields, values) => {
 exports.handler = async (event) => {
   console.log('routeUpdate invoked');
 
-  const userId = event.requestContext?.authorizer?.claims?.sub;
+  const userId = getUserId(event);
   if (!userId) return response(401, { error: 'Unauthorised - no valid token' });
 
-  let body;
-  try {
-    body = JSON.parse(event.body || '{}');
-  } catch {
-    return response(400, { error: 'Invalid JSON in request body' });
-  }
+  const { body, parseError } = parseBody(event);
+  if (parseError) return parseError;
 
   const { routeId } = body;
   if (!routeId) return response(400, { error: 'routeId is required in request body' });
@@ -80,8 +76,7 @@ exports.handler = async (event) => {
   }
 
   if (body.arriveBy !== undefined) {
-    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
-    if (!timeRegex.test(body.arriveBy))
+    if (!ARRIVE_BY_REGEX.test(body.arriveBy))
       return response(400, { error: 'arriveBy must be in HH:MM format (local time)' });
   }
 
@@ -96,7 +91,12 @@ exports.handler = async (event) => {
     const invalidDays = body.daysOfWeek.filter(d => !VALID_DAYS.includes(d));
     if (invalidDays.length > 0)
       return response(400, { error: `Invalid daysOfWeek: ${invalidDays.join(', ')}` });
+    if (new Set(body.daysOfWeek).size !== body.daysOfWeek.length)
+      return response(400, { error: 'daysOfWeek must not contain duplicate entries' });
   }
+
+  if (body.userActive !== undefined && typeof body.userActive !== 'boolean')
+    return response(400, { error: 'userActive must be a boolean' });
 
   if (body.travelMode !== undefined) {
     if (!VALID_TRAVEL_MODES.includes(body.travelMode))
@@ -121,6 +121,8 @@ exports.handler = async (event) => {
   if (body.intermediates !== undefined) {
     if (!Array.isArray(body.intermediates))
       return response(400, { error: 'intermediates must be an array' });
+    if (body.intermediates.length > 25)
+      return response(400, { error: 'Maximum 25 intermediates allowed' }); // matches Google Routes API hard limit
     for (let i = 0; i < body.intermediates.length; i++) {
       const err = validateWaypoint(body.intermediates[i], `intermediates[${i}]`);
       if (err) return response(400, { error: err });
@@ -174,28 +176,10 @@ exports.handler = async (event) => {
         ? computeArrivalUTC(effectiveArriveBy, effectiveTimezone, effectiveDaysOfWeek)
         : null;
 
-      let apiKey;
-      try {
-        apiKey = await getRoutesApiKey();
-      } catch (err) {
-        console.error('Failed to fetch Routes API key from SSM:', err);
-        return response(500, { error: 'Internal server error' });
-      }
-
-      let routeData;
-      try {
-        routeData = await callWithRetry(
-          () => callRoutesApi(originPlaceId, destPlaceId, effectiveIntermediates, effectiveTravelMode, apiKey, targetTimeUTC),
-          3,
-          500
-        );
-      } catch (err) {
-        console.error('Routes API call failed:', err);
-        if (err.retryable === false && (err.status === 400 || err.status === 404)) {
-          return response(422, { error: 'Could not compute a route for the given waypoints. Check that the locations are valid and a route exists for the selected travel mode.' });
-        }
-        return response(503, { error: 'Route computation service unavailable. Please try again.' });
-      }
+      const { data: routeData, errorResponse } = await computeRoute(
+        originPlaceId, destPlaceId, effectiveIntermediates, effectiveTravelMode, targetTimeUTC
+      );
+      if (errorResponse) return errorResponse;
 
       // Resolved coordinates from Routes API legs
       const originLatLng = routeData.legs[0].startLocation.latLng;
