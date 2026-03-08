@@ -1,14 +1,42 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  Serverless route advisory stack — REST API Gateway with Cognito auth,
-  4 route CRUD Lambdas, 3 batch Lambdas, and 3 DynamoDB tables.
+  Serverless route advisory stack -- REST API Gateway with Cognito auth,
+  4 route CRUD Lambdas, 7 batch Lambdas, 2 event-driven Lambdas, and 3 DynamoDB tables.
 
 Parameters:
   TicketmasterApiKey:
     Type: String
     NoEcho: true
-    Description: Ticketmaster Discovery API Consumer Key for eventScraper
+    Description: >
+      Ticketmaster Discovery API Consumer Key for eventScraper.
+      Store the value in ticketmaster-key.txt (gitignored) and pass it
+      via samconfig.toml parameter_overrides or --parameter-overrides at deploy time.
+
+  TransitlandApiKey:
+    Type: String
+    NoEcho: true
+    Description: >
+      Transitland API key for GTFS feed discovery in transitInitializer.
+      Register for a free key at https://transit.land.
+      Store the value in transitland-key.txt (gitignored) and pass it
+      via samconfig.toml parameter_overrides or --parameter-overrides at deploy time.
+
+  GoogleRoutesApiKey:
+    Type: String
+    NoEcho: true
+    Description: >
+      Google Routes API key for server-side route computation in routeCreate and routeUpdate.
+      Store the value in google-routes-key.txt (gitignored) and pass it
+      via samconfig.toml parameter_overrides or --parameter-overrides at deploy time.
+
+  TomTomApiKey:
+    Type: String
+    NoEcho: true
+    Description: >
+      TomTom Traffic Incidents API key for roadworksScraper.
+      Store the value in tomtom_key.txt (gitignored) and pass it
+      via samconfig.toml parameter_overrides or --parameter-overrides at deploy time.
 
 Globals:
   Function:
@@ -26,22 +54,22 @@ Globals:
 
 Resources:
 
-  # ───────────────────────────────
+  # -------------------------------
   # LAMBDA LAYERS
-  # ───────────────────────────────
+  # -------------------------------
   UtilsLayer:
     Type: AWS::Serverless::LayerVersion
     Properties:
       LayerName: utils
-      Description: Shared utilities — chunkArray, parseDurationToMinutes, batchGet, batchWrite
+      Description: Shared utilities -- chunkArray, parseDurationToMinutes, batchGet, batchWrite
       ContentUri: src/shared/
       CompatibleRuntimes:
         - nodejs20.x
       RetentionPolicy: Delete
 
-  # ───────────────────────────────
+  # -------------------------------
   # COGNITO
-  # ───────────────────────────────
+  # -------------------------------
   UserPool:
     Type: AWS::Cognito::UserPool
     Properties:
@@ -69,7 +97,7 @@ Resources:
           - Name: verified_email
             Priority: 1
       LambdaConfig:
-        PostConfirmation: !GetAtt PostConfirmationLambda.Arn
+        PostConfirmation: !GetAtt ProfileCreateLambda.Arn
 
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
@@ -79,6 +107,7 @@ Resources:
       GenerateSecret: false
       ExplicitAuthFlows:
         - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
       PreventUserExistenceErrors: ENABLED
       AccessTokenValidity: 1
@@ -89,13 +118,17 @@ Resources:
         IdToken: hours
         RefreshToken: days
 
-  # ───────────────────────────────
-  # IAM
-  # ───────────────────────────────
-  LambdaExecutionRole:
+  # -------------------------------
+  # IAM -- per-function roles (least privilege)
+  # Each role grants only the actions and tables that Lambda needs.
+  # -------------------------------
+
+  # Shared by all 4 API Lambdas (routeCreate, routeUpdate, routeFetch, routeDelete).
+  # locationDB UpdateItem needed for activeRouteCount adjustments on create/delete.
+  RouteApiRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: serverless-lambda-execution-role
+      RoleName: route-api-role
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -117,26 +150,167 @@ Resources:
                   - dynamodb:UpdateItem
                   - dynamodb:DeleteItem
                   - dynamodb:Query
-                  - dynamodb:Scan
+                Resource: !GetAtt UserRouteDB.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt LocationDB.Arn
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/routeApp/googleRoutesApiKey
+
+  # weatherScraper: reads active cities, writes weather records.
+  WeatherScraperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: weather-scraper-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:Scan
+                Resource: !GetAtt LocationDB.Arn
+              - Effect: Allow
+                Action: dynamodb:BatchWriteItem
+                Resource: !GetAtt DelaysDB.Arn
+
+  # eventScraper: reads active cities, writes event records, reads Ticketmaster key from SSM.
+  EventScraperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: event-scraper-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:Scan
+                Resource: !GetAtt LocationDB.Arn
+              - Effect: Allow
+                Action: dynamodb:BatchWriteItem
+                Resource: !GetAtt DelaysDB.Arn
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/routeApp/ticketmasterApiKey
+
+  # roadworksScraper: reads active cities, writes roadworks records, reads TomTom key from SSM.
+  RoadworksScraperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: roadworks-scraper-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:Scan
+                Resource: !GetAtt LocationDB.Arn
+              - Effect: Allow
+                Action: dynamodb:BatchWriteItem
+                Resource: !GetAtt DelaysDB.Arn
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/routeApp/tomtomApiKey
+
+  # holidayScraper: reads active cities from locationDB, writes HOLIDAY# + HOLIDAY_REFRESH to delaysDB.
+  HolidayScraperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: holiday-scraper-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:Scan
+                Resource: !GetAtt LocationDB.Arn
+              - Effect: Allow
+                Action:
                   - dynamodb:BatchGetItem
                   - dynamodb:BatchWriteItem
-                Resource:
-                  - !GetAtt UserRouteDB.Arn
-                  - !GetAtt DelaysDB.Arn
-                  - !GetAtt LocationDB.Arn
+                Resource: !GetAtt DelaysDB.Arn
+
+  # delayOrchestrator: scans schedules, enqueues SQS chunks, manages idempotency lock in SSM.
+  DelayOrchestratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: delay-orchestrator-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:Scan
+                Resource: !GetAtt UserRouteDB.Arn
         - PolicyName: SQSAccess
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action:
-                  - sqs:SendMessage
-                Resource: !GetAtt DelayWorkerQueue.Arn
-              - Effect: Allow
-                Action:
-                  - sqs:ReceiveMessage
-                  - sqs:DeleteMessage
-                  - sqs:GetQueueAttributes
+                Action: sqs:SendMessage
                 Resource: !GetAtt DelayWorkerQueue.Arn
         - PolicyName: SSMAccess
           PolicyDocument:
@@ -147,11 +321,145 @@ Resources:
                   - ssm:GetParameter
                   - ssm:PutParameter
                   - ssm:DeleteParameter
-                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/routeApp/*
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/routeApp/orchestratorLock
 
-  # ───────────────────────────────
+  # delayWorker: batch-reads routes and delays, batch-writes forecasts, consumes SQS.
+  DelayWorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: delay-worker-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource: !GetAtt UserRouteDB.Arn
+              - Effect: Allow
+                Action: dynamodb:BatchGetItem
+                Resource: !GetAtt DelaysDB.Arn
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt DelayWorkerQueue.Arn
+
+  # profileCreate: writes a single PROFILE record on user registration.
+  ProfileCreateRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: post-confirmation-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt UserRouteDB.Arn
+
+  # transitInitializer: stream-triggered on locationDB INSERT, writes transitlandFeedId back to locationDB.
+  # Repurposed from GTFS static ingest — now discovers and stores the Transitland feed ID per city.
+  TransitInitializerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: transit-initializer-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:UpdateItem
+                Resource: !GetAtt LocationDB.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !GetAtt LocationDB.StreamArn
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/routeApp/transitlandApiKey
+
+  # transitScraper: nightly EventBridge, reads locationDB, calls Transitland API, writes TRANSIT# to delaysDB.
+  TransitScraperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: transit-scraper-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:Scan
+                Resource: !GetAtt LocationDB.Arn
+              - Effect: Allow
+                Action: dynamodb:BatchWriteItem
+                Resource: !GetAtt DelaysDB.Arn
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/routeApp/transitlandApiKey
+
+  # -------------------------------
   # SSM PARAMETERS
-  # ───────────────────────────────
+  # Note: CloudFormation only supports String type here (not SecureString).
+  # The key is protected by IAM -- only EventScraperRole can read this parameter.
+  # -------------------------------
   TicketmasterApiKeyParam:
     Type: AWS::SSM::Parameter
     Properties:
@@ -160,12 +468,36 @@ Resources:
       Value: !Ref TicketmasterApiKey
       Description: Ticketmaster Discovery API Consumer Key for eventScraper
 
-  # ───────────────────────────────
-  # SQS — delay worker queue + DLQ
+  TransitlandApiKeyParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /routeApp/transitlandApiKey
+      Type: String
+      Value: !Ref TransitlandApiKey
+      Description: Transitland API key for GTFS feed discovery in transitInitializer
+
+  GoogleRoutesApiKeyParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /routeApp/googleRoutesApiKey
+      Type: String
+      Value: !Ref GoogleRoutesApiKey
+      Description: Google Routes API key for server-side route computation (routeCreate, routeUpdate)
+
+  TomTomApiKeyParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /routeApp/tomtomApiKey
+      Type: String
+      Value: !Ref TomTomApiKey
+      Description: TomTom Traffic Incidents API key for roadworksScraper
+
+  # -------------------------------
+  # SQS -- delay worker queue + DLQ
   # Orchestrator enqueues chunks of 1,000 routes.
   # Worker Lambdas process one chunk per invocation.
   # Failed chunks retry up to 3 times then go to DLQ.
-  # ───────────────────────────────
+  # -------------------------------
   DelayWorkerDLQ:
     Type: AWS::SQS::Queue
     Properties:
@@ -177,20 +509,20 @@ Resources:
     Properties:
       QueueName: delayWorkerQueue
       VisibilityTimeout: 300           # Must be >= Lambda timeout (300s)
-      MessageRetentionPeriod: 86400    # 1 day — messages are nightly only
+      MessageRetentionPeriod: 86400    # 1 day -- messages are nightly only
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt DelayWorkerDLQ.Arn
         maxReceiveCount: 3             # Retry failed chunks 3 times before DLQ
 
-  # ───────────────────────────────
+  # -------------------------------
   # PK: userId (Cognito sub)
   # SK: recordType
   #   PROFILE
   #   ROUTE#<routeId>
   #   SCHEDULE#<routeId>
-  #   FORECAST#<routeId>        ← day-keyed, no specific dates
-  # TTL enabled on ttl attribute — used for SCHEDULE# auto-expiry
-  # ───────────────────────────────
+  #   FORECAST#<routeId>        -- day-keyed, no specific dates
+  # TTL enabled on ttl attribute -- used for SCHEDULE# auto-expiry
+  # -------------------------------
   UserRouteDB:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -214,15 +546,15 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
-  # ───────────────────────────────
-  # DYNAMODB — delaysDB
+  # -------------------------------
+  # DYNAMODB -- delaysDB
   # PK: cityKey (IE#DUBLIN)
   # SK: type#date
   #   WEATHER#YYYY-MM-DD
   #   EVENTS#YYYY-MM-DD
   #   (future: ROADWORKS#, TRANSIT# etc.)
-  # TTL enabled — records auto-expire after 8 days
-  # ───────────────────────────────
+  # TTL enabled -- records auto-expire after 8 days
+  # -------------------------------
   DelaysDB:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -244,13 +576,13 @@ Resources:
       SSESpecification:
         SSEEnabled: true
 
-  # ───────────────────────────────
-  # DYNAMODB — locationDB
+  # -------------------------------
+  # DYNAMODB -- locationDB
   # PK: cityKey (IE#DUBLIN)
   # Stores city metadata, centroid coords, activeRouteCount
   # activeRouteCount maintained atomically via TransactWriteItems in routeCreate/routeDelete
-  # active: false when activeRouteCount hits zero — scrapers skip inactive cities
-  # ───────────────────────────────
+  # active: false when activeRouteCount hits zero -- scrapers skip inactive cities
+  # -------------------------------
   LocationDB:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -264,10 +596,12 @@ Resources:
           KeyType: HASH
       SSESpecification:
         SSEEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE  # Triggers transitInitializer on city INSERT
 
-  # ───────────────────────────────
+  # -------------------------------
   # API GATEWAY
-  # ───────────────────────────────
+  # -------------------------------
   RouteGW:
     Type: AWS::Serverless::Api
     Properties:
@@ -289,16 +623,16 @@ Resources:
           LoggingLevel: INFO
           MetricsEnabled: true
 
-  # ───────────────────────────────
+  # -------------------------------
   # API LAMBDAS
-  # ───────────────────────────────
+  # -------------------------------
   RouteFetchLambda:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: routeFetch
       CodeUri: src/api/routeFetch/
       Handler: routeFetch.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !GetAtt RouteApiRole.Arn
       Timeout: 30
       MemorySize: 128
       Events:
@@ -315,7 +649,7 @@ Resources:
       FunctionName: routeCreate
       CodeUri: src/api/routeCreate/
       Handler: routeCreate.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !GetAtt RouteApiRole.Arn
       Timeout: 30
       MemorySize: 256
       Events:
@@ -332,7 +666,7 @@ Resources:
       FunctionName: routeUpdate
       CodeUri: src/api/routeUpdate/
       Handler: routeUpdate.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !GetAtt RouteApiRole.Arn
       Timeout: 30
       MemorySize: 128
       Events:
@@ -349,7 +683,7 @@ Resources:
       FunctionName: routeDelete
       CodeUri: src/api/routeDelete/
       Handler: routeDelete.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !GetAtt RouteApiRole.Arn
       Timeout: 30
       MemorySize: 128
       Events:
@@ -360,16 +694,16 @@ Resources:
             Path: /routes/delete
             Method: DELETE
 
-  # ───────────────────────────────
+  # -------------------------------
   # BATCH LAMBDAS
-  # ───────────────────────────────
+  # -------------------------------
   WeatherScraperLambda:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: weatherScraper
       CodeUri: src/batch/weatherScraper/
       Handler: weatherScraper.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !GetAtt WeatherScraperRole.Arn
 
   EventScraperLambda:
     Type: AWS::Serverless::Function
@@ -377,7 +711,23 @@ Resources:
       FunctionName: eventScraper
       CodeUri: src/batch/eventScraper/
       Handler: eventScraper.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !GetAtt EventScraperRole.Arn
+
+  RoadworksScraperLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: roadworksScraper
+      CodeUri: src/batch/roadworksScraper/
+      Handler: roadworksScraper.handler
+      Role: !GetAtt RoadworksScraperRole.Arn
+
+  HolidayScraperLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: holidayScraper
+      CodeUri: src/batch/holidayScraper/
+      Handler: holidayScraper.handler
+      Role: !GetAtt HolidayScraperRole.Arn
 
   DelayOrchestratorLambda:
     Type: AWS::Serverless::Function
@@ -385,7 +735,7 @@ Resources:
       FunctionName: delayOrchestrator
       CodeUri: src/batch/delayOrchestrator/
       Handler: delayOrchestrator.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !GetAtt DelayOrchestratorRole.Arn
 
   DelayWorkerLambda:
     Type: AWS::Serverless::Function
@@ -393,7 +743,7 @@ Resources:
       FunctionName: delayWorker
       CodeUri: src/batch/delayWorker/
       Handler: delayWorker.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !GetAtt DelayWorkerRole.Arn
       Events:
         SQSTrigger:
           Type: SQS
@@ -403,40 +753,76 @@ Resources:
             ScalingConfig:
               MaximumConcurrency: 20      # Max 20 worker Lambdas running simultaneously
 
-  # ───────────────────────────────
+  # -------------------------------
   # REGISTRATION TRIGGERS
-  # ───────────────────────────────
-  PostConfirmationLambda:
+  # -------------------------------
+  ProfileCreateLambda:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: postConfirmation
-      CodeUri: src/registration/
-      Handler: postConfirmation.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      FunctionName: profileCreate
+      CodeUri: src/event/profileCreate/
+      Handler: profileCreate.handler
+      Role: !GetAtt ProfileCreateRole.Arn
       Timeout: 10
       MemorySize: 128
 
-  PostConfirmationLambdaPermission:
+  ProfileCreateLambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !GetAtt PostConfirmationLambda.Arn
+      FunctionName: !GetAtt ProfileCreateLambda.Arn
       Action: lambda:InvokeFunction
       Principal: cognito-idp.amazonaws.com
       SourceArn: !GetAtt UserPool.Arn
 
-  # ───────────────────────────────
+  # -------------------------------
+  # EVENT-DRIVEN LAMBDAS
+  # transitInitializer -- DynamoDB Stream on locationDB (INSERT)
+  # transitScraper     -- EventBridge nightly (part of ScrapersRule)
+  # profileCreate      -- Cognito PostConfirmation trigger (see REGISTRATION TRIGGERS)
+  # -------------------------------
+  TransitInitializerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: transitInitializer
+      CodeUri: src/event/transitInitializer/
+      Handler: transitInitializer.handler
+      Role: !GetAtt TransitInitializerRole.Arn
+      MemorySize: 512   # ZIP parsing; Dublin GTFS static can be 10MB+ in memory
+      Events:
+        LocationDBStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt LocationDB.StreamArn
+            StartingPosition: LATEST
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["INSERT"]}'
+            BisectBatchOnFunctionError: true
+
+  TransitScraperLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: transitScraper
+      CodeUri: src/batch/transitScraper/
+      Handler: transitScraper.handler
+      Role: !GetAtt TransitScraperRole.Arn
+
+  # -------------------------------
   # EVENTBRIDGE
-  # 23:00 GMT — weatherScraper + eventScraper
-  # 00:00 GMT — delayOrchestrator (1 hour after scrapers)
-  # ───────────────────────────────
+  # 23:00 GMT -- weatherScraper + eventScraper
+  # 00:00 GMT -- delayOrchestrator (1 hour after scrapers)
+  # -------------------------------
   ScrapersRule:
     Type: AWS::Events::Rule
     DependsOn:
       - WeatherScraperLambda
       - EventScraperLambda
+      - TransitScraperLambda
+      - RoadworksScraperLambda
+      - HolidayScraperLambda
     Properties:
       Name: scrapersSchedule
-      Description: Triggers weatherScraper and eventScraper nightly at 23:00 GMT
+      Description: Triggers weatherScraper, eventScraper, transitScraper, roadworksScraper, and holidayScraper nightly at 23:00 GMT
       ScheduleExpression: cron(0 23 * * ? *)
       State: ENABLED
       Targets:
@@ -444,6 +830,12 @@ Resources:
           Arn: !GetAtt WeatherScraperLambda.Arn
         - Id: eventScraperTarget
           Arn: !GetAtt EventScraperLambda.Arn
+        - Id: transitScraperTarget
+          Arn: !GetAtt TransitScraperLambda.Arn
+        - Id: roadworksScraperTarget
+          Arn: !GetAtt RoadworksScraperLambda.Arn
+        - Id: holidayScraperTarget
+          Arn: !GetAtt HolidayScraperLambda.Arn
 
   WeatherScraperLambdaPermission:
     Type: AWS::Lambda::Permission
@@ -457,6 +849,30 @@ Resources:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !GetAtt EventScraperLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScrapersRule.Arn
+
+  TransitScraperLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt TransitScraperLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScrapersRule.Arn
+
+  RoadworksScraperLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RoadworksScraperLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScrapersRule.Arn
+
+  HolidayScraperLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt HolidayScraperLambda.Arn
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt ScrapersRule.Arn
@@ -481,27 +897,27 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt DelayCalculatorRule.Arn
 
-  # ───────────────────────────────
-  # SNS — alert topic for operational alarms
+  # -------------------------------
+  # SNS -- alert topic for operational alarms
   # Subscribe an email address via the console after deployment
-  # ───────────────────────────────
+  # -------------------------------
   AlertTopic:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: routeAppAlerts
       DisplayName: Route App Operational Alerts
 
-  # ───────────────────────────────
+  # -------------------------------
   # CLOUDWATCH ALARMS
-  # ───────────────────────────────
+  # -------------------------------
 
-  # Fires when any message lands in the DLQ — means delayWorker
+  # Fires when any message lands in the DLQ -- means delayWorker
   # failed a chunk 3 times. Investigate CloudWatch logs immediately.
   DLQDepthAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: delayWorkerDLQ-MessageDepth
-      AlarmDescription: Messages in delayWorkerDLQ — delayWorker chunk failed after 3 retries
+      AlarmDescription: Messages in delayWorkerDLQ -- delayWorker chunk failed after 3 retries
       Namespace: AWS/SQS
       MetricName: ApproximateNumberOfMessagesVisible
       Dimensions:
@@ -518,12 +934,12 @@ Resources:
       OKActions:
         - !Ref AlertTopic
 
-  # Fires if delayOrchestrator errors or times out — nightly pipeline blocked
+  # Fires if delayOrchestrator errors or times out -- nightly pipeline blocked
   OrchestratorErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: delayOrchestrator-Errors
-      AlarmDescription: delayOrchestrator Lambda errors — nightly forecast pipeline may be blocked
+      AlarmDescription: delayOrchestrator Lambda errors -- nightly forecast pipeline may be blocked
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
@@ -544,7 +960,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: delayOrchestrator-Duration
-      AlarmDescription: delayOrchestrator approaching timeout — schedule scan may need optimisation
+      AlarmDescription: delayOrchestrator approaching timeout -- schedule scan may need optimisation
       Namespace: AWS/Lambda
       MetricName: Duration
       Dimensions:
@@ -593,6 +1009,6 @@ Outputs:
     Value: !Ref DelayWorkerDLQ
 
   AlertTopicArn:
-    Description: SNS topic ARN for operational alerts — subscribe an email via console after deployment
+    Description: SNS topic ARN for operational alerts -- subscribe an email via console after deployment
     Value: !Ref AlertTopic
 
