@@ -3,8 +3,5 @@
   "version": "1.0.0",
   "description": "Nightly worker — processes route chunks from SQS and writes FORECAST# records",
   "main": "delayWorker.js",
-  "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/util-dynamodb": "^3.0.0"
-  }
+  "dependencies": {}
 }

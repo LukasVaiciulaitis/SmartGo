@@ -3,9 +3,5 @@
   "version": "1.0.0",
   "description": "Nightly orchestrator — scans active schedules and enqueues chunks to SQS",
   "main": "delayOrchestrator.js",
-  "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/client-sqs": "^3.0.0",
-    "@aws-sdk/util-dynamodb": "^3.0.0"
-  }
+  "dependencies": {}
 }

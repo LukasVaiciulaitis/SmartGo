@@ -47,19 +47,36 @@ const acquireLock = async () => {
       return false;
     }
 
+    // Stale lock — overwrite unconditionally (previous run crashed)
     console.warn(`Stale lock found (${Math.round(age / 1000)}s old) — previous run likely crashed, overwriting`);
+    await ssm.send(new PutParameterCommand({
+      Name: LOCK_PARAM,
+      Value: String(Date.now()),
+      Type: 'String',
+      Overwrite: true
+    }));
+    return true;
+
   } catch (err) {
     if (err.name !== 'ParameterNotFound') throw err;
-    // No lock exists — proceed to write
+    // No lock exists — attempt atomic write; Overwrite: false fails if another invocation
+    // writes between our GetParameter and PutParameter (TOCTOU guard)
   }
 
-  // Write lock with current timestamp as value
-  await ssm.send(new PutParameterCommand({
-    Name: LOCK_PARAM,
-    Value: String(Date.now()),
-    Type: 'String',
-    Overwrite: true
-  }));
+  try {
+    await ssm.send(new PutParameterCommand({
+      Name: LOCK_PARAM,
+      Value: String(Date.now()),
+      Type: 'String',
+      Overwrite: false
+    }));
+  } catch (writeErr) {
+    if (writeErr.name === 'ParameterAlreadyExists') {
+      console.warn('Lock acquired by concurrent invocation — exiting');
+      return false;
+    }
+    throw writeErr;
+  }
 
   return true;
 };
