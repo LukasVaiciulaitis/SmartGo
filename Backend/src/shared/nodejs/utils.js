@@ -186,11 +186,19 @@ const DAY_MAP = { 0: 'SUN', 1: 'MON', 2: 'TUE', 3: 'WED', 4: 'THU', 5: 'FRI', 6:
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 
-// Basic IANA timezone format check — e.g. "Europe/Dublin", "America/New_York", "UTC"
-// Full validation happens implicitly in delayWorker when the timezone is used for conversion
+// Validate an IANA timezone identifier by attempting to construct an Intl.DateTimeFormat with it.
+// This is authoritative — it uses the runtime's own IANA database, so any timezone Node 20 knows
+// about (e.g. "Europe/Dublin", "America/New_York", "UTC") passes, and anything invalid throws a
+// RangeError which we catch and return false. Avoids the regex approach which was too permissive
+// and would surface as a 500 (Intl RangeError) rather than a 400 validation error.
 const isValidIANATimezone = (tz) => {
   if (typeof tz !== 'string' || tz.trim() === '') return false;
-  return /^[A-Za-z]+([/_+-][A-Za-z0-9_+-]+)*$/.test(tz);
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 // Computes the UTC ISO timestamp for the next matching weekday at the given local HH:MM time.
@@ -251,8 +259,12 @@ const validateWaypoint = (waypoint, name) => {
     return `${name} is required`;
   if (!waypoint.placeId || typeof waypoint.placeId !== 'string' || !waypoint.placeId.trim())
     return `${name} must include a placeId`;
+  if (waypoint.placeId.length > 500)
+    return `${name}.placeId must not exceed 500 characters`;
   if (!waypoint.label || typeof waypoint.label !== 'string' || waypoint.label.trim() === '')
     return `${name} must include a label`;
+  if (waypoint.label.length > 100)
+    return `${name}.label must not exceed 100 characters`;
   return null;
 };
 
@@ -262,6 +274,8 @@ const validateWaypoint = (waypoint, name) => {
 const validateAddressComponents = (waypoint, name) => {
   if (!Array.isArray(waypoint.addressComponents) || waypoint.addressComponents.length === 0)
     return `${name}.addressComponents must be a non-empty array`;
+  if (waypoint.addressComponents.length > 20)
+    return `${name}.addressComponents must not exceed 20 entries`;
   for (const c of waypoint.addressComponents) {
     if (!Array.isArray(c.types) || c.types.length === 0)
       return `${name}.addressComponents entries must each include a non-empty types array`;
