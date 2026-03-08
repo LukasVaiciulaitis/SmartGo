@@ -7,7 +7,7 @@ const { DynamoDBClient, QueryCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
 const { response, getUserId, MAX_ROUTES_PER_USER } = require('/opt/nodejs/utils');
 
-const client = new DynamoDBClient({});
+const dynamoClient = new DynamoDBClient({});
 const USER_ROUTE_TABLE = process.env.USER_ROUTE_TABLE;
 
 exports.handler = async (event) => {
@@ -22,7 +22,7 @@ exports.handler = async (event) => {
     let lastEvaluatedKey = undefined;
 
     do {
-      const result = await client.send(new QueryCommand({
+      const result = await dynamoClient.send(new QueryCommand({
         TableName: USER_ROUTE_TABLE,
         KeyConditionExpression: 'userId = :uid',
         ExpressionAttributeValues: marshall({ ':uid': userId }),

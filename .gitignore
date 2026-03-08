@@ -9,7 +9,7 @@
 ### Backend ###
 
 # Node Packages
-.node_modules/
+node_modules/
 
 ### Android ###
 

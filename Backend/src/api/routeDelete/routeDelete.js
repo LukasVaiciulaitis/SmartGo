@@ -1,14 +1,16 @@
 // routeDelete — DELETE /routes/delete
-// Deactivates SCHEDULE# first (stops nightly processing), then deletes ROUTE# and FORECAST#.
-// Decrements activeRouteCount in locationDB atomically with ROUTE# deletion via transaction.
+// Atomically deletes ROUTE#, deactivates SCHEDULE#, and decrements both counters in one transaction.
+// Keeping SCHEDULE# inside the transaction eliminates the previous Step 1 / Step 2 non-atomicity
+// gap where SCHEDULE# could be deactivated but ROUTE# left intact on a mid-operation failure.
 // When activeRouteCount reaches zero, scrapers skip the city (they filter activeRouteCount > 0).
-// SCHEDULE# uses TTL for final cleanup — DynamoDB auto-expires within 48 hours.
+// SCHEDULE# TTL is set inside the transaction as belt-and-suspenders; DynamoDB auto-expires as
+// the final safety net within 48 hours.
 
 const { DynamoDBClient, GetItemCommand, DeleteItemCommand, UpdateItemCommand, TransactWriteItemsCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
 const { response, getUserId, parseBody, UUID_REGEX } = require('/opt/nodejs/utils');
 
-const client = new DynamoDBClient({});
+const dynamoClient = new DynamoDBClient({});
 const USER_ROUTE_TABLE = process.env.USER_ROUTE_TABLE;
 const LOCATION_DB_TABLE = process.env.LOCATION_DB_TABLE;
 
@@ -29,7 +31,7 @@ exports.handler = async (event) => {
 
   try {
     // Fetch route to get cityKey before deleting
-    const routeResult = await client.send(new GetItemCommand({
+    const routeResult = await dynamoClient.send(new GetItemCommand({
       TableName: USER_ROUTE_TABLE,
       Key: marshall({ userId, recordType: `ROUTE#${routeId}` })
     }));
@@ -42,23 +44,26 @@ exports.handler = async (event) => {
     const now = new Date().toISOString();
     const scheduleTtl = Math.floor(Date.now() / 1000) + (24 * 60 * 60);
 
-    // Step 1: Deactivate SCHEDULE# first — stops delayOrchestrator picking it up tonight
-    // TTL set to now + 24h as belt-and-suspenders; DynamoDB auto-expires as final safety net
-    await client.send(new UpdateItemCommand({
-      TableName: USER_ROUTE_TABLE,
-      Key: marshall({ userId, recordType: `SCHEDULE#${routeId}` }),
-      UpdateExpression: 'SET #ttl = :ttl, active = :false',
-      ExpressionAttributeNames: { '#ttl': 'ttl' },
-      ExpressionAttributeValues: marshall({ ':ttl': scheduleTtl, ':false': false })
-    }));
-
-    // Step 2: Delete ROUTE#, decrement locationDB counter, and decrement PROFILE routeCount atomically
-    await client.send(new TransactWriteItemsCommand({
+    // Single atomic transaction: delete ROUTE#, deactivate SCHEDULE#, and decrement both counters.
+    // SCHEDULE# deactivation is inside the transaction — if the transaction rolls back (condition
+    // failure), SCHEDULE# remains active and the route is left in a consistent state for retry.
+    await dynamoClient.send(new TransactWriteItemsCommand({
       TransactItems: [
         {
           Delete: {
             TableName: USER_ROUTE_TABLE,
             Key: marshall({ userId, recordType: `ROUTE#${routeId}` })
+          }
+        },
+        {
+          // Deactivate SCHEDULE# — stops delayOrchestrator picking it up tonight.
+          // TTL set as belt-and-suspenders; DynamoDB auto-expires as final safety net.
+          Update: {
+            TableName: USER_ROUTE_TABLE,
+            Key: marshall({ userId, recordType: `SCHEDULE#${routeId}` }),
+            UpdateExpression: 'SET #ttl = :ttl, active = :false',
+            ExpressionAttributeNames: { '#ttl': 'ttl' },
+            ExpressionAttributeValues: marshall({ ':ttl': scheduleTtl, ':false': false })
           }
         },
         {
@@ -69,11 +74,7 @@ exports.handler = async (event) => {
             // Scrapers filter activeRouteCount > 0 directly — no separate active flag needed.
             UpdateExpression: 'ADD activeRouteCount :dec SET lastActiveAt = :ts',
             ConditionExpression: 'activeRouteCount > :zero',
-            ExpressionAttributeValues: marshall({
-              ':dec': -1,
-              ':zero': 0,
-              ':ts': now
-            })
+            ExpressionAttributeValues: marshall({ ':dec': -1, ':zero': 0, ':ts': now })
           }
         },
         {
@@ -88,11 +89,11 @@ exports.handler = async (event) => {
       ]
     }));
 
-    // Step 3: Delete FORECAST# — non-critical, fire and forget
+    // Delete FORECAST# — non-critical, fire and forget
     // If this fails the stale forecast is harmless — routeFetch won't surface it
     // without a matching ROUTE# record
     try {
-      await client.send(new DeleteItemCommand({
+      await dynamoClient.send(new DeleteItemCommand({
         TableName: USER_ROUTE_TABLE,
         Key: marshall({ userId, recordType: `FORECAST#${routeId}` })
       }));
@@ -105,21 +106,29 @@ exports.handler = async (event) => {
 
   } catch (err) {
     // TransactionCanceledException — one of the two ConditionExpressions failed.
+    // The whole transaction rolled back: ROUTE#, SCHEDULE#, and both counters are unchanged.
     // CancellationReasons indices correspond to TransactItems order:
     //   [0] Delete ROUTE#     — no condition, never the cause
-    //   [1] Update locationDB — condition: activeRouteCount > 0
-    //   [2] Update PROFILE    — condition: routeCount > 0
+    //   [1] Update SCHEDULE#  — no condition, never the cause
+    //   [2] Update locationDB — condition: activeRouteCount > 0
+    //   [3] Update PROFILE    — condition: routeCount > 0
     if (err.name === 'TransactionCanceledException') {
       const reasons = err.CancellationReasons || [];
-      const locationConditionFailed = reasons[1]?.Code === 'ConditionalCheckFailed';
-      const profileConditionFailed  = reasons[2]?.Code === 'ConditionalCheckFailed';
+      const locationConditionFailed = reasons[2]?.Code === 'ConditionalCheckFailed';
+      const profileConditionFailed  = reasons[3]?.Code === 'ConditionalCheckFailed';
 
       if (locationConditionFailed || profileConditionFailed) {
-        // Transaction was cancelled — ROUTE# was not deleted; clean it up explicitly.
-        // If this delete fails, surface 500 — the route still exists and cannot be retried
-        // without potentially double-decrementing the counters.
+        // Transaction rolled back — ROUTE# and SCHEDULE# were not modified.
+        // Delete ROUTE# and deactivate SCHEDULE# individually to complete the route removal.
+        // Note: the compensating ops below are themselves non-atomic — if PROFILE decrement
+        // fails after ROUTE# is deleted, routeCount will be permanently off by one. This is
+        // an accepted limitation: it only occurs on a pre-existing counter inconsistency
+        // (ROUTE# existed while the counter was already at its floor), which should not
+        // arise under normal operation.
+        const scheduleTtl = Math.floor(Date.now() / 1000) + (24 * 60 * 60);
+
         try {
-          await client.send(new DeleteItemCommand({
+          await dynamoClient.send(new DeleteItemCommand({
             TableName: USER_ROUTE_TABLE,
             Key: marshall({ userId, recordType: `ROUTE#${routeId}` })
           }));
@@ -128,11 +137,23 @@ exports.handler = async (event) => {
           return response(500, { error: 'Internal server error' });
         }
 
+        try {
+          await dynamoClient.send(new UpdateItemCommand({
+            TableName: USER_ROUTE_TABLE,
+            Key: marshall({ userId, recordType: `SCHEDULE#${routeId}` }),
+            UpdateExpression: 'SET #ttl = :ttl, active = :false',
+            ExpressionAttributeNames: { '#ttl': 'ttl' },
+            ExpressionAttributeValues: marshall({ ':ttl': scheduleTtl, ':false': false })
+          }));
+        } catch (scheduleErr) {
+          console.warn(`SCHEDULE# deactivation failed after condition failure for routeId=${routeId}:`, scheduleErr.message);
+        }
+
         if (locationConditionFailed) {
           // activeRouteCount was already 0 — city already inactive, no locationDB update needed.
-          // Transaction rolled back the PROFILE decrement — apply it manually.
+          // Apply PROFILE decrement separately since the transaction rolled it back.
           try {
-            await client.send(new UpdateItemCommand({
+            await dynamoClient.send(new UpdateItemCommand({
               TableName: USER_ROUTE_TABLE,
               Key: marshall({ userId, recordType: 'PROFILE' }),
               UpdateExpression: 'ADD routeCount :dec',
@@ -140,14 +161,15 @@ exports.handler = async (event) => {
               ExpressionAttributeValues: marshall({ ':dec': -1, ':zero': 0 })
             }));
           } catch (profileErr) {
-            console.warn(`PROFILE routeCount decrement skipped or failed for userId=${userId}:`, profileErr.message);
+            // Failure here leaves routeCount off by one — log as error for visibility.
+            console.error(`PROFILE routeCount decrement failed for userId=${userId} — counter is now off by one:`, profileErr.message);
           }
           console.warn(`activeRouteCount already zero for cityKey=${route?.cityKey} — city already inactive`);
         } else {
           // routeCount was already 0 — data inconsistency (ROUTE# existed but PROFILE counter
-          // was at floor). Transaction rolled back the locationDB decrement — apply it manually.
+          // was at floor). Apply locationDB decrement separately since the transaction rolled it back.
           try {
-            await client.send(new UpdateItemCommand({
+            await dynamoClient.send(new UpdateItemCommand({
               TableName: LOCATION_DB_TABLE,
               Key: marshall({ cityKey: route.cityKey }),
               UpdateExpression: 'ADD activeRouteCount :dec SET lastActiveAt = :ts',
