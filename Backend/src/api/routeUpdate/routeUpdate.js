@@ -16,7 +16,7 @@
 //   timezone is the IANA identifier from Android's ZoneId.systemDefault().id
 //   Both can be updated independently; updating either invalidates the forecast
 
-const { DynamoDBClient, GetItemCommand, TransactWriteItemsCommand, DeleteItemCommand } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBClient, GetItemCommand, BatchGetItemCommand, TransactWriteItemsCommand, DeleteItemCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
 const { parseDurationToMinutes, callWithRetry, response, VALID_DAYS, VALID_TRAVEL_MODES, isValidIANATimezone, computeArrivalUTC, validateWaypoint, validateAddressComponents, extractCityFromComponents, buildCityObject, normaliseWaypoint, UUID_REGEX, getRoutesApiKey, callRoutesApi } = require('/opt/nodejs/utils');
 
@@ -68,6 +68,8 @@ exports.handler = async (event) => {
       error: `No valid fields provided. Route fields: ${ROUTE_FIELDS.join(', ')}. Schedule fields: ${SCHEDULE_FIELDS.join(', ')}.`
     });
   }
+
+  const needsRoutesApiCall = routeFieldsToUpdate.some(f => PATH_FIELDS.has(f));
 
   // ─── Validate client-supplied fields ─────────────────────────────────────────
   if (body.title !== undefined) {
@@ -126,36 +128,45 @@ exports.handler = async (event) => {
   }
 
   try {
-    // Verify route exists for this user
-    const existing = await dynamoClient.send(new GetItemCommand({
-      TableName: TABLE,
-      Key: marshall({ userId, recordType: `ROUTE#${routeId}` })
-    }));
+    // Verify route exists — when path fields change, batch-fetch ROUTE# and SCHEDULE# together
+    // to save a round-trip over the two separate GetItem calls that would otherwise be needed.
+    let stored, storedSchedule = {};
 
-    if (!existing.Item) {
+    if (needsRoutesApiCall) {
+      const { Responses } = await dynamoClient.send(new BatchGetItemCommand({
+        RequestItems: {
+          [TABLE]: {
+            Keys: [
+              marshall({ userId, recordType: `ROUTE#${routeId}` }),
+              marshall({ userId, recordType: `SCHEDULE#${routeId}` })
+            ]
+          }
+        }
+      }));
+      const items = (Responses?.[TABLE] || []).map(i => unmarshall(i));
+      stored = items.find(i => i.recordType === `ROUTE#${routeId}`) ?? null;
+      storedSchedule = items.find(i => i.recordType === `SCHEDULE#${routeId}`) ?? {};
+    } else {
+      const result = await dynamoClient.send(new GetItemCommand({
+        TableName: TABLE,
+        Key: marshall({ userId, recordType: `ROUTE#${routeId}` })
+      }));
+      stored = result.Item ? unmarshall(result.Item) : null;
+    }
+
+    if (!stored) {
       return response(404, { error: `No route found with routeId: ${routeId}` });
     }
 
     // ─── Routes API call (conditional) ─────────────────────────────────────────
     // Required whenever path-affecting fields change — origin, destination, intermediates, travelMode.
     // Uses the incoming value when provided, falls back to the stored value otherwise.
-    const needsRoutesApiCall = routeFieldsToUpdate.some(f => PATH_FIELDS.has(f));
-
     if (needsRoutesApiCall) {
-      const stored = unmarshall(existing.Item);
-
       const originPlaceId = body.origin?.placeId ?? stored.origin.placeId;
       const destPlaceId = body.destination?.placeId ?? stored.destination.placeId;
       const effectiveIntermediates = body.intermediates ?? stored.intermediates ?? [];
       const effectiveTravelMode = body.travelMode ?? stored.travelMode;
 
-      // Fetch SCHEDULE# to derive arriveBy/timezone/daysOfWeek for the Routes API call.
-      // body may already contain updated values for any of these; fall back to stored schedule.
-      const scheduleResult = await dynamoClient.send(new GetItemCommand({
-        TableName: TABLE,
-        Key: marshall({ userId, recordType: `SCHEDULE#${routeId}` })
-      }));
-      const storedSchedule = scheduleResult.Item ? unmarshall(scheduleResult.Item) : {};
       const effectiveArriveBy = body.arriveBy ?? storedSchedule.arriveBy;
       const effectiveTimezone = body.timezone ?? storedSchedule.timezone;
       const effectiveDaysOfWeek = body.daysOfWeek ?? storedSchedule.daysOfWeek;
@@ -195,13 +206,13 @@ exports.handler = async (event) => {
       if (body.origin !== undefined) {
         const originCityData = extractCityFromComponents(body.origin.addressComponents);
         body.origin = normaliseWaypoint(body.origin, originLatLng);
-        body.cityOrigin = buildCityObject(originCityData.city, originCityData.countryCode, originLatLng.latitude, originLatLng.longitude);
+        body.cityOrigin = buildCityObject(originCityData.city, originCityData.countryCode, originLatLng.latitude, originLatLng.longitude, originCityData.subdivisionCode);
         routeFieldsToUpdate.push('cityOrigin');
       }
       if (body.destination !== undefined) {
         const destinationCityData = extractCityFromComponents(body.destination.addressComponents);
         body.destination = normaliseWaypoint(body.destination, destinationLatLng);
-        body.cityDestination = buildCityObject(destinationCityData.city, destinationCityData.countryCode, destinationLatLng.latitude, destinationLatLng.longitude);
+        body.cityDestination = buildCityObject(destinationCityData.city, destinationCityData.countryCode, destinationLatLng.latitude, destinationLatLng.longitude, destinationCityData.subdivisionCode);
         body.cityKey = body.cityDestination.cityKey;
         routeFieldsToUpdate.push('cityDestination', 'cityKey');
       }

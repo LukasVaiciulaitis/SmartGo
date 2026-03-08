@@ -76,7 +76,7 @@ const validateRequest = (body) => {
 // subdivisionCode is optional (ISO 3166-2 e.g. "IE-L") — only written when present.
 // Transitland feed discovery (transitlandFeedIds, gtfsRtAvailable) is owned entirely
 // by transitInitializer, which fires on the locationDB INSERT stream event.
-const buildLocationDBTransactItem = (cityKey, city, countryCode, subdivisionCode, cityLat, cityLng) => {
+const buildLocationDBTransactItem = (cityKey, city, countryCode, subdivisionCode, cityLat, cityLng, now) => {
   const setFields = [
     'city = :city',
     'countryCode = :cc',
@@ -94,7 +94,7 @@ const buildLocationDBTransactItem = (cityKey, city, countryCode, subdivisionCode
     ':lat': cityLat,
     ':lng': cityLng,
     ':active': true,
-    ':ts': new Date().toISOString(),
+    ':ts': now,
     ':inc': 1
   };
   return {
@@ -181,7 +181,6 @@ exports.handler = async (event) => {
 
   const routeId = randomUUID();
   const now = new Date().toISOString();
-  const scheduleTtl = Math.floor(Date.now() / 1000) + (14 * 24 * 60 * 60);
 
   const routeItem = {
     userId,
@@ -221,8 +220,7 @@ exports.handler = async (event) => {
     // Stored here so delayWorker always uses the timezone active when the route was created/updated
     timezone: body.timezone,
     daysOfWeek: body.daysOfWeek,
-    updatedAt: now,
-    ttl: scheduleTtl
+    updatedAt: now
   };
 
   // ─── DynamoDB transaction ────────────────────────────────────────────────────
@@ -244,7 +242,7 @@ exports.handler = async (event) => {
         },
         { Put: { TableName: USER_ROUTE_TABLE, Item: marshall(routeItem, { removeUndefinedValues: true }) } },
         { Put: { TableName: USER_ROUTE_TABLE, Item: marshall(scheduleItem) } },
-        buildLocationDBTransactItem(cityDestination.cityKey, cityDestination.city, cityDestination.countryCode, cityDestination.subdivisionCode, cityDestination.lat, cityDestination.lng)
+        buildLocationDBTransactItem(cityDestination.cityKey, cityDestination.city, cityDestination.countryCode, cityDestination.subdivisionCode, cityDestination.lat, cityDestination.lng, now)
       ]
     }));
 

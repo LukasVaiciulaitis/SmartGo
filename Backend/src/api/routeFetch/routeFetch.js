@@ -65,7 +65,6 @@ exports.handler = async (event) => {
         intermediates: route.intermediates || [],
         destination: route.destination,
         geometry: route.geometry || null,
-        steps: route.steps || [],
         travelMode: route.travelMode,
         staticDuration: route.staticDuration,
         trafficDuration: route.trafficDuration ?? null,
