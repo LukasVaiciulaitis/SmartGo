@@ -8,11 +8,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.pullrefresh.PullRefreshIndicator
 import androidx.compose.material.pullrefresh.pullRefresh
 import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -26,12 +27,33 @@ fun DashboardScreen(
     uiState: DashboardUiState,
     onAddRouteClick: () -> Unit,
     onRefresh: () -> Unit,
-    onLogoutClick: () -> Unit
+    onLogoutClick: () -> Unit,
+    onEditRoute: (routeId: String) -> Unit,
+    onDeleteRouteRequest: (route: Route) -> Unit,
+    onDeleteConfirm: () -> Unit,
+    onDeleteDismiss: () -> Unit
 ) {
     val pullRefreshState = rememberPullRefreshState(
         refreshing = uiState.isRefreshing,
         onRefresh = onRefresh
     )
+
+    // Delete confirmation dialog
+    uiState.pendingDeleteRoute?.let { route ->
+        AlertDialog(
+            onDismissRequest = onDeleteDismiss,
+            title = { Text("Delete route") },
+            text = { Text("Delete \"${route.title}\"? This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = onDeleteConfirm) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDeleteDismiss) { Text("Cancel") }
+            }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -78,7 +100,12 @@ fun DashboardScreen(
                     }
                 }
                 else -> {
-                    RoutesList(routes = uiState.routes, modifier = Modifier.fillMaxSize())
+                    RoutesList(
+                        routes = uiState.routes,
+                        onEditRoute = onEditRoute,
+                        onDeleteRoute = onDeleteRouteRequest,
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
             }
 
@@ -100,19 +127,34 @@ fun DashboardScreen(
 }
 
 @Composable
-private fun RoutesList(routes: List<Route>, modifier: Modifier = Modifier) {
+private fun RoutesList(
+    routes: List<Route>,
+    onEditRoute: (routeId: String) -> Unit,
+    onDeleteRoute: (route: Route) -> Unit,
+    modifier: Modifier = Modifier
+) {
     LazyColumn(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         items(routes) { route ->
-            RouteItem(route)
+            RouteItem(
+                route = route,
+                onEditClick = { onEditRoute(route.id) },
+                onDeleteClick = { onDeleteRoute(route) }
+            )
         }
     }
 }
 
 @Composable
-private fun RouteItem(route: Route) {
+private fun RouteItem(
+    route: Route,
+    onEditClick: () -> Unit,
+    onDeleteClick: () -> Unit
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium
@@ -123,11 +165,42 @@ private fun RouteItem(route: Route) {
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                route.title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    route.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
+                )
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Route options")
+                    }
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Edit") },
+                            onClick = {
+                                menuExpanded = false
+                                onEditClick()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                            onClick = {
+                                menuExpanded = false
+                                onDeleteClick()
+                            }
+                        )
+                    }
+                }
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),

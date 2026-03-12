@@ -3,12 +3,8 @@ package com.example.smartgoprototype.ui.addroute
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -19,17 +15,14 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TimeInput
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -40,14 +33,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.unit.dp
 import com.example.smartgoprototype.domain.model.PlaceLocation
 import com.example.smartgoprototype.domain.model.TravelMode
 import java.time.DayOfWeek
-import java.time.format.TextStyle
-import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,7 +55,6 @@ fun AddRouteScreen(
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Local error channel for picker errors so it can be compiled without ViewModel hooks
     var localError by remember { mutableStateOf<String?>(null) }
 
     val arriveByState = rememberTimePickerState(
@@ -163,9 +152,7 @@ fun AddRouteScreen(
                 onPick = destinationPicker
             )
 
-            ArriveByTimeInput(
-                state = arriveByState
-            )
+            ArriveByTimeInput(state = arriveByState)
 
             TravelModePicker(
                 selected = uiState.travelMode,
@@ -188,10 +175,7 @@ private fun PlaceField(
 
     OutlinedTextField(
         value = value.orEmpty(),
-        onValueChange = {
-            // User intent to type/search triggers Places autocomplete.
-            onPick()
-        },
+        onValueChange = { onPick() },
         modifier = Modifier
             .fillMaxWidth()
             .onFocusChanged { focusState ->
@@ -215,77 +199,4 @@ private fun PlaceField(
             }
         }
     )
-}
-
-@Composable
-private fun TravelModePicker(
-    selected: TravelMode,
-    onSelected: (TravelMode) -> Unit
-) {
-    Column(Modifier.fillMaxWidth()) {
-        Text("Travel mode", style = MaterialTheme.typography.labelLarge)
-        Spacer(Modifier.height(8.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            val modeLabels = mapOf(
-                TravelMode.DRIVE to "Drive",
-                TravelMode.TRANSIT to "Transit",
-                TravelMode.WALK to "Walk",
-                TravelMode.TWO_WHEELER to "2W",
-                TravelMode.BICYCLE to "Bike"
-            )
-            TravelMode.values().forEach { mode ->
-                FilterChip(
-                    modifier = Modifier.weight(1f),
-                    selected = selected == mode,
-                    onClick = { onSelected(mode) },
-                    label = {
-                        Text(
-                            text = modeLabels[mode] ?: mode.name.replace('_', ' '),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                )
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ArriveByTimeInput(
-    state: androidx.compose.material3.TimePickerState
-) {
-    Column(Modifier.fillMaxWidth()) {
-        Text("Arrive by", style = MaterialTheme.typography.labelLarge)
-        Spacer(Modifier.height(6.dp))
-        TimeInput(state = state)
-    }
-}
-
-@Composable
-private fun DaysOfWeekChips(
-    selected: Set<DayOfWeek>,
-    onToggle: (DayOfWeek) -> Unit
-) {
-    Column(Modifier.fillMaxWidth()) {
-        Text("Active days", style = MaterialTheme.typography.labelLarge)
-        Spacer(Modifier.height(8.dp))
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            DayOfWeek.values().forEach { day ->
-                FilterChip(
-                    selected = selected.contains(day),
-                    onClick = { onToggle(day) },
-                    label = { Text(day.getDisplayName(TextStyle.SHORT, Locale.getDefault())) }
-                )
-            }
-        }
-    }
 }

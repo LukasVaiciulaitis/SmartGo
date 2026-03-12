@@ -21,6 +21,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.amplifyframework.core.Amplify
 import com.example.smartgoprototype.ui.addroute.AddRouteRoute
+import com.example.smartgoprototype.ui.editroute.EditRouteRoute
 import com.example.smartgoprototype.ui.dashboard.DashboardRoute
 import com.example.smartgoprototype.ui.login.LoginRoute
 import com.example.smartgoprototype.ui.register.RegisterRoute
@@ -127,7 +128,10 @@ fun SmartGoAppNavHost(
         composable(Routes.DASHBOARD) {
             DashboardRoute(
                 navController = navController,
-                onNavigateToAddRoute = { navController.navigate(Routes.ADD_ROUTE) }
+                onNavigateToAddRoute = { navController.navigate(Routes.ADD_ROUTE) },
+                onNavigateToEditRoute = { routeId ->
+                    navController.navigate("${Routes.EDIT_ROUTE}/$routeId")
+                }
             )
         }
 
@@ -140,7 +144,25 @@ fun SmartGoAppNavHost(
                         ?.savedStateHandle
                         ?.set("route_created", true)
                     navController.popBackStack()
-                } // return to dashboard
+                }
+            )
+        }
+
+        // EditRoute
+        composable(
+            route = "${Routes.EDIT_ROUTE}/{routeId}",
+            arguments = listOf(
+                navArgument("routeId") { type = NavType.StringType }
+            )
+        ) {
+            EditRouteRoute(
+                onBack = { navController.popBackStack() },
+                onSaved = {
+                    navController.previousBackStackEntry
+                        ?.savedStateHandle
+                        ?.set("route_created", true)
+                    navController.popBackStack()
+                }
             )
         }
     }

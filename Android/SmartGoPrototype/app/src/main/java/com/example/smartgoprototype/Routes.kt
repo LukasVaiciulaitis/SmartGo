@@ -7,4 +7,5 @@ object Routes {
     const val DASHBOARD = "dashboard"
     const val CONFIRM_SIGN_UP = "confirm_sign_up"
     const val ADD_ROUTE = "add_route"
+    const val EDIT_ROUTE = "edit_route"
 }

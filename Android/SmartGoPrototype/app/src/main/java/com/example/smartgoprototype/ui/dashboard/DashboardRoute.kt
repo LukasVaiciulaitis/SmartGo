@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.collectLatest
 fun DashboardRoute(
     navController: NavHostController,
     onNavigateToAddRoute: () -> Unit,
+    onNavigateToEditRoute: (routeId: String) -> Unit,
     viewModel: DashboardViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -40,6 +41,10 @@ fun DashboardRoute(
         uiState = uiState,
         onAddRouteClick = onNavigateToAddRoute,
         onRefresh = viewModel::refresh,
-        onLogoutClick = viewModel::signOut
+        onLogoutClick = viewModel::signOut,
+        onEditRoute = onNavigateToEditRoute,
+        onDeleteRouteRequest = viewModel::requestDelete,
+        onDeleteConfirm = viewModel::confirmDelete,
+        onDeleteDismiss = viewModel::dismissDeleteConfirmation
     )
 }

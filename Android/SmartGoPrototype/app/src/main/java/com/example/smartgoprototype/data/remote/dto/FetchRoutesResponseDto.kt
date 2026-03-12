@@ -11,5 +11,6 @@ data class FetchedRouteDto(
     @field:Json(name = "title") val title: String,
     @field:Json(name = "origin") val origin: CreatedEndpointDto,
     @field:Json(name = "destination") val destination: CreatedEndpointDto,
+    @field:Json(name = "travelMode") val travelMode: String?,
     @field:Json(name = "schedule") val schedule: CreatedScheduleDto?
 )

@@ -2,6 +2,7 @@ package com.example.smartgoprototype.ui.dashboard
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.smartgoprototype.domain.model.Route
 import com.example.smartgoprototype.domain.repository.AuthRepository
 import com.example.smartgoprototype.domain.repository.RouteRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -37,6 +38,34 @@ class DashboardViewModel @Inject constructor(
                 _signOutEvent.send(Unit)
             }.onFailure { e ->
                 _uiState.value = _uiState.value.copy(errorMessage = e.message ?: "Sign out failed")
+            }
+        }
+    }
+
+    fun requestDelete(route: Route) {
+        _uiState.value = _uiState.value.copy(pendingDeleteRoute = route)
+    }
+
+    fun dismissDeleteConfirmation() {
+        _uiState.value = _uiState.value.copy(pendingDeleteRoute = null)
+    }
+
+    fun confirmDelete() {
+        val route = _uiState.value.pendingDeleteRoute ?: return
+        _uiState.value = _uiState.value.copy(pendingDeleteRoute = null, isDeletingRoute = true)
+
+        viewModelScope.launch {
+            try {
+                routeRepository.deleteRoute(route.id)
+                _uiState.value = _uiState.value.copy(
+                    isDeletingRoute = false,
+                    routes = _uiState.value.routes.filterNot { it.id == route.id }
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    isDeletingRoute = false,
+                    errorMessage = e.message ?: "Failed to delete route"
+                )
             }
         }
     }

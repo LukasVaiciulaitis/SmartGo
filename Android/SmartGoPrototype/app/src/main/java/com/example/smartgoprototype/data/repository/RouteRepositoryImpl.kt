@@ -57,7 +57,7 @@ class RouteRepositoryImpl @Inject constructor(
 
         val response = executeApiCall { api.createRoute(request) }
 
-        return response.route.toDomainRoute(fallbackSchedule = schedule)
+        return response.route.toDomainRoute(fallbackSchedule = schedule, fallbackTravelMode = travelMode)
     }
 
     override suspend fun updateRoute(
@@ -139,7 +139,7 @@ class RouteRepositoryImpl @Inject constructor(
         return order.filter { contains(it) }.map { it.name.take(3) }
     }
 
-    private fun RouteCreatedDto.toDomainRoute(fallbackSchedule: RouteSchedule): Route {
+    private fun RouteCreatedDto.toDomainRoute(fallbackSchedule: RouteSchedule, fallbackTravelMode: TravelMode): Route {
         val mappedSchedule = schedule.toDomainScheduleOrNull() ?: fallbackSchedule
         return Route(
             id = routeId,
@@ -154,6 +154,7 @@ class RouteRepositoryImpl @Inject constructor(
                 label = destination.label,
                 addressComponents = null
             ),
+            travelMode = travelMode.toDomainTravelMode() ?: fallbackTravelMode,
             schedule = mappedSchedule
         )
     }
@@ -178,9 +179,13 @@ class RouteRepositoryImpl @Inject constructor(
                 label = destination.label,
                 addressComponents = null
             ),
+            travelMode = travelMode.toDomainTravelMode() ?: TravelMode.DRIVE,
             schedule = mappedSchedule
         )
     }
+
+    private fun String?.toDomainTravelMode(): TravelMode? =
+        TravelMode.entries.find { it.name == this }
 
     private fun com.example.smartgoprototype.data.remote.dto.CreatedScheduleDto?.toDomainScheduleOrNull(): RouteSchedule? {
         val schedule = this ?: return null
