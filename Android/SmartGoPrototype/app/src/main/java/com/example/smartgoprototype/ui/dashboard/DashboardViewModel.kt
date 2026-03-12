@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.smartgoprototype.domain.model.Route
 import com.example.smartgoprototype.domain.repository.AuthRepository
+import java.time.DayOfWeek
 import com.example.smartgoprototype.domain.repository.RouteRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.channels.Channel
@@ -65,6 +66,38 @@ class DashboardViewModel @Inject constructor(
                 _uiState.value = _uiState.value.copy(
                     isDeletingRoute = false,
                     errorMessage = e.message ?: "Failed to delete route"
+                )
+            }
+        }
+    }
+
+    fun toggleDay(routeId: String, day: DayOfWeek) {
+        val route = _uiState.value.routes.find { it.id == routeId } ?: return
+        val oldDays = route.schedule.activeDays
+        val newDays = if (oldDays.contains(day)) oldDays - day else oldDays + day
+        if (newDays.isEmpty()) return // keep at least one active day
+
+        // Optimistic update
+        _uiState.value = _uiState.value.copy(
+            routes = _uiState.value.routes.map { r ->
+                if (r.id == routeId) r.copy(schedule = r.schedule.copy(activeDays = newDays)) else r
+            }
+        )
+
+        viewModelScope.launch {
+            try {
+                routeRepository.updateRoute(
+                    routeId = routeId,
+                    activeDays = newDays,
+                    timezone = route.schedule.timeZoneId
+                )
+            } catch (e: Exception) {
+                // Revert on failure
+                _uiState.value = _uiState.value.copy(
+                    routes = _uiState.value.routes.map { r ->
+                        if (r.id == routeId) r.copy(schedule = r.schedule.copy(activeDays = oldDays)) else r
+                    },
+                    errorMessage = e.message ?: "Failed to update route"
                 )
             }
         }

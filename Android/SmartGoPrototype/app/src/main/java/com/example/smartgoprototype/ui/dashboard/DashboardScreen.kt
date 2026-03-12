@@ -1,5 +1,6 @@
 package com.example.smartgoprototype.ui.dashboard
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -31,7 +32,8 @@ fun DashboardScreen(
     onEditRoute: (routeId: String) -> Unit,
     onDeleteRouteRequest: (route: Route) -> Unit,
     onDeleteConfirm: () -> Unit,
-    onDeleteDismiss: () -> Unit
+    onDeleteDismiss: () -> Unit,
+    onToggleDay: (routeId: String, day: DayOfWeek) -> Unit
 ) {
     val pullRefreshState = rememberPullRefreshState(
         refreshing = uiState.isRefreshing,
@@ -104,6 +106,7 @@ fun DashboardScreen(
                         routes = uiState.routes,
                         onEditRoute = onEditRoute,
                         onDeleteRoute = onDeleteRouteRequest,
+                        onToggleDay = onToggleDay,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -131,6 +134,7 @@ private fun RoutesList(
     routes: List<Route>,
     onEditRoute: (routeId: String) -> Unit,
     onDeleteRoute: (route: Route) -> Unit,
+    onToggleDay: (routeId: String, day: DayOfWeek) -> Unit,
     modifier: Modifier = Modifier
 ) {
     LazyColumn(
@@ -141,7 +145,8 @@ private fun RoutesList(
             RouteItem(
                 route = route,
                 onEditClick = { onEditRoute(route.id) },
-                onDeleteClick = { onDeleteRoute(route) }
+                onDeleteClick = { onDeleteRoute(route) },
+                onToggleDay = { day -> onToggleDay(route.id, day) }
             )
         }
     }
@@ -151,7 +156,8 @@ private fun RoutesList(
 private fun RouteItem(
     route: Route,
     onEditClick: () -> Unit,
-    onDeleteClick: () -> Unit
+    onDeleteClick: () -> Unit,
+    onToggleDay: (DayOfWeek) -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
@@ -214,6 +220,7 @@ private fun RouteItem(
                 Spacer(Modifier.width(10.dp))
                 DaysRow(
                     activeDays = route.schedule.activeDays,
+                    onToggle = onToggleDay,
                     modifier = Modifier.weight(1f)
                 )
                 Spacer(Modifier.width(10.dp))
@@ -229,6 +236,7 @@ private fun RouteItem(
 @Composable
 private fun DaysRow(
     activeDays: Set<DayOfWeek>,
+    onToggle: (DayOfWeek) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val orderedDays = listOf(
@@ -248,6 +256,7 @@ private fun DaysRow(
         orderedDays.forEach { (day, label) ->
             val isActive = activeDays.contains(day)
             Surface(
+                modifier = Modifier.clickable { onToggle(day) },
                 shape = MaterialTheme.shapes.small,
                 color = if (isActive) {
                     MaterialTheme.colorScheme.primary
