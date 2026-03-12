@@ -2,6 +2,7 @@ package com.example.smartgoprototype.data.auth
 
 import android.util.Log
 import com.amplifyframework.auth.AuthUserAttributeKey
+import com.amplifyframework.auth.cognito.result.AWSCognitoAuthSignOutResult
 import com.amplifyframework.auth.options.AuthSignUpOptions
 import com.amplifyframework.core.Amplify
 import com.example.smartgoprototype.domain.repository.AuthRepository
@@ -9,15 +10,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import javax.inject.Inject
 import kotlin.coroutines.resume
 
-/**
- * AuthRepository implementation backed by AWS Amplify (Cognito).
- *
- * Design notes:
- * - Exposes a small domain-friendly API (`login/register/confirmSignUp`) and returns `Result<Unit>`
- *   so ViewModels can handle success/failure without knowing Amplify's callback types.
- * - Uses `suspendCancellableCoroutine` to bridge Amplify callbacks into coroutines.
- */
-class CognitoAuthRepository @Inject constructor() : AuthRepository {
+class CognitoAuthRepository @Inject constructor(
+    private val sessionProvider: SessionProvider
+) : AuthRepository {
 
     override suspend fun login(identifier: String, password: String): Result<Unit> {
         return suspendCancellableCoroutine { cont ->
@@ -44,10 +39,7 @@ class CognitoAuthRepository @Inject constructor() : AuthRepository {
         }
     }
 
-    override suspend fun register(
-        email: String,
-        password: String
-    ): Result<Unit> {
+    override suspend fun register(email: String, password: String): Result<Unit> {
         return suspendCancellableCoroutine { cont ->
             val normalizedEmail = email.trim().lowercase()
 
@@ -64,7 +56,6 @@ class CognitoAuthRepository @Inject constructor() : AuthRepository {
                         "CognitoAuthRepository",
                         "signUp success: isSignUpComplete=${result.isSignUpComplete}, nextStep=${result.nextStep.signUpStep}"
                     )
-                    // For this prototype, the UI handles the confirmation step separately.
                     cont.resume(Result.success(Unit))
                 },
                 { error ->
@@ -75,10 +66,7 @@ class CognitoAuthRepository @Inject constructor() : AuthRepository {
         }
     }
 
-    override suspend fun confirmSignUp(
-        email: String,
-        code: String
-    ): Result<Unit> {
+    override suspend fun confirmSignUp(email: String, code: String): Result<Unit> {
         return suspendCancellableCoroutine { cont ->
             val normalizedEmail = email.trim().lowercase()
 
@@ -106,4 +94,21 @@ class CognitoAuthRepository @Inject constructor() : AuthRepository {
         }
     }
 
+    override suspend fun signOut(): Result<Unit> {
+        return suspendCancellableCoroutine { cont ->
+            Amplify.Auth.signOut { signOutResult ->
+                when (signOutResult) {
+                    is AWSCognitoAuthSignOutResult.CompleteSignOut,
+                    is AWSCognitoAuthSignOutResult.PartialSignOut -> {
+                        sessionProvider.clearCache()
+                        cont.resume(Result.success(Unit))
+                    }
+                    is AWSCognitoAuthSignOutResult.FailedSignOut -> {
+                        Log.e("CognitoAuthRepository", "signOut failed", signOutResult.exception)
+                        cont.resume(Result.failure(signOutResult.exception))
+                    }
+                }
+            }
+        }
+    }
 }

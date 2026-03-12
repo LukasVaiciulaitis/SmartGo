@@ -7,28 +7,36 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import javax.inject.Inject
 import kotlin.coroutines.resume
 
-/**
- * Small abstraction over where to get auth tokens
- *
- * This keeps networking code (OkHttp/Retrofit) from depending directly on the Amplify/Cognito APIs,
- * which makes the interceptor and repositories easier to test and easier to swap in the future.
- */
 interface SessionProvider {
-    /**
-     * @return A JWT ID token to send to the backend, or null if the user is signed out / unavailable.
-     */
+    /** Suspends to fetch a fresh token from the auth provider, updating the cache. */
     suspend fun getIdToken(): String?
+
+    /** Returns the cached token if within its TTL, or null if cold/expired. Non-blocking. */
+    fun getCachedIdToken(): String?
+
+    /** Invalidates the token cache. Call after sign-out. */
+    fun clearCache()
 }
 
-/**
- * Amplify/Cognito implementation of [SessionProvider].
- *
- * This converts Amplify's callback-based API into a suspend function using
- * `suspendCancellableCoroutine`, so callers can use normal coroutine patterns.
- */
+// Cognito ID tokens last 1 hour; treat as expired 10 minutes early.
+private const val TOKEN_TTL_MS = 50L * 60L * 1_000L
+
 class CognitoSessionProvider @Inject constructor() : SessionProvider {
 
+    @Volatile private var cachedToken: String? = null
+    @Volatile private var cacheExpiryMs: Long = 0L
+
+    override fun getCachedIdToken(): String? =
+        cachedToken?.takeIf { System.currentTimeMillis() < cacheExpiryMs }
+
+    override fun clearCache() {
+        cachedToken = null
+        cacheExpiryMs = 0L
+    }
+
     override suspend fun getIdToken(): String? {
+        getCachedIdToken()?.let { return it }
+
         return suspendCancellableCoroutine { cont ->
             Amplify.Auth.fetchAuthSession(
                 { session ->
@@ -46,13 +54,17 @@ class CognitoSessionProvider @Inject constructor() : SessionProvider {
                         val tokens = tokenResult.value
                         val error = tokenResult.error
 
-                        // Logging for testing
                         Log.d("CognitoSessionProvider", "tokenResult.value != null: ${tokens != null}")
                         Log.d("CognitoSessionProvider", "tokenResult.error: $error")
 
                         val idToken = tokens?.idToken
 
                         Log.d("CognitoSessionProvider", "Got idToken = ${!idToken.isNullOrBlank()}")
+
+                        if (!idToken.isNullOrBlank()) {
+                            cachedToken = idToken
+                            cacheExpiryMs = System.currentTimeMillis() + TOKEN_TTL_MS
+                        }
 
                         cont.resume(idToken)
                     } catch (e: Exception) {
