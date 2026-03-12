@@ -155,6 +155,7 @@ class RouteRepositoryImpl @Inject constructor(
                 addressComponents = null
             ),
             travelMode = travelMode.toDomainTravelMode() ?: fallbackTravelMode,
+            userActive = true,
             schedule = mappedSchedule
         )
     }
@@ -180,6 +181,7 @@ class RouteRepositoryImpl @Inject constructor(
                 addressComponents = null
             ),
             travelMode = travelMode.toDomainTravelMode() ?: TravelMode.DRIVE,
+            userActive = userActive ?: true,
             schedule = mappedSchedule
         )
     }

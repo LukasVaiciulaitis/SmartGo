@@ -71,6 +71,32 @@ class DashboardViewModel @Inject constructor(
         }
     }
 
+    fun toggleRouteActive(routeId: String) {
+        val route = _uiState.value.routes.find { it.id == routeId } ?: return
+        val newActive = !route.userActive
+
+        // Optimistic update
+        _uiState.value = _uiState.value.copy(
+            routes = _uiState.value.routes.map { r ->
+                if (r.id == routeId) r.copy(userActive = newActive) else r
+            }
+        )
+
+        viewModelScope.launch {
+            try {
+                routeRepository.updateRoute(routeId = routeId, userActive = newActive)
+            } catch (e: Exception) {
+                // Revert on failure
+                _uiState.value = _uiState.value.copy(
+                    routes = _uiState.value.routes.map { r ->
+                        if (r.id == routeId) r.copy(userActive = route.userActive) else r
+                    },
+                    errorMessage = e.message ?: "Failed to update route"
+                )
+            }
+        }
+    }
+
     fun toggleDay(routeId: String, day: DayOfWeek) {
         val route = _uiState.value.routes.find { it.id == routeId } ?: return
         val oldDays = route.schedule.activeDays

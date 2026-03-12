@@ -46,6 +46,7 @@ fun DashboardRoute(
         onDeleteRouteRequest = viewModel::requestDelete,
         onDeleteConfirm = viewModel::confirmDelete,
         onDeleteDismiss = viewModel::dismissDeleteConfirmation,
-        onToggleDay = viewModel::toggleDay
+        onToggleDay = viewModel::toggleDay,
+        onToggleActive = viewModel::toggleRouteActive
     )
 }

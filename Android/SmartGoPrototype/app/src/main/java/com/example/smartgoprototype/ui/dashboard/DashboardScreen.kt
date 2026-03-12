@@ -33,7 +33,8 @@ fun DashboardScreen(
     onDeleteRouteRequest: (route: Route) -> Unit,
     onDeleteConfirm: () -> Unit,
     onDeleteDismiss: () -> Unit,
-    onToggleDay: (routeId: String, day: DayOfWeek) -> Unit
+    onToggleDay: (routeId: String, day: DayOfWeek) -> Unit,
+    onToggleActive: (routeId: String) -> Unit
 ) {
     val pullRefreshState = rememberPullRefreshState(
         refreshing = uiState.isRefreshing,
@@ -107,6 +108,7 @@ fun DashboardScreen(
                         onEditRoute = onEditRoute,
                         onDeleteRoute = onDeleteRouteRequest,
                         onToggleDay = onToggleDay,
+                        onToggleActive = onToggleActive,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -135,6 +137,7 @@ private fun RoutesList(
     onEditRoute: (routeId: String) -> Unit,
     onDeleteRoute: (route: Route) -> Unit,
     onToggleDay: (routeId: String, day: DayOfWeek) -> Unit,
+    onToggleActive: (routeId: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     LazyColumn(
@@ -146,7 +149,8 @@ private fun RoutesList(
                 route = route,
                 onEditClick = { onEditRoute(route.id) },
                 onDeleteClick = { onDeleteRoute(route) },
-                onToggleDay = { day -> onToggleDay(route.id, day) }
+                onToggleDay = { day -> onToggleDay(route.id, day) },
+                onToggleActive = { onToggleActive(route.id) }
             )
         }
     }
@@ -157,7 +161,8 @@ private fun RouteItem(
     route: Route,
     onEditClick: () -> Unit,
     onDeleteClick: () -> Unit,
-    onToggleDay: (DayOfWeek) -> Unit
+    onToggleDay: (DayOfWeek) -> Unit,
+    onToggleActive: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
@@ -225,8 +230,8 @@ private fun RouteItem(
                 )
                 Spacer(Modifier.width(10.dp))
                 Switch(
-                    checked = true,
-                    onCheckedChange = { }
+                    checked = route.userActive,
+                    onCheckedChange = { onToggleActive() }
                 )
             }
         }
