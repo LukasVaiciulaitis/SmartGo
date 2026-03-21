@@ -1,0 +1,36 @@
+name: Deploy SAM
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - uses: aws-actions/setup-sam@v2
+
+      - run: sam build
+        working-directory: Backend
+
+      - run: |
+          sam deploy \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              TicketmasterApiKey=${{ secrets.TICKETMASTER_API_KEY }} \
+              TransitlandApiKey=${{ secrets.TRANSITLAND_API_KEY }} \
+              GoogleRoutesApiKey=${{ secrets.GOOGLE_ROUTES_API_KEY }} \
+              TomTomApiKey=${{ secrets.TOMTOM_API_KEY }}
+        working-directory: Backend
