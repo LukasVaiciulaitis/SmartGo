@@ -6,5 +6,7 @@ data class DashboardUiState(
     val isInitialLoading: Boolean = false,
     val isRefreshing: Boolean = false,
     val routes: List<Route> = emptyList(),
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val pendingDeleteRoute: Route? = null,
+    val isDeletingRoute: Boolean = false
 )

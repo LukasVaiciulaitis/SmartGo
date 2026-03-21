@@ -9,5 +9,7 @@ data class Route(
     val title: String,
     val origin: PlaceLocation,
     val destination: PlaceLocation,
+    val travelMode: TravelMode,
+    val userActive: Boolean,
     val schedule: RouteSchedule
 )

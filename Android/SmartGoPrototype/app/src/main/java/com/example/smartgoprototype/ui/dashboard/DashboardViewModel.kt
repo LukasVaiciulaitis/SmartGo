@@ -2,43 +2,131 @@ package com.example.smartgoprototype.ui.dashboard
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.smartgoprototype.domain.model.Route
+import com.example.smartgoprototype.domain.repository.AuthRepository
+import java.time.DayOfWeek
 import com.example.smartgoprototype.domain.repository.RouteRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-/**
- * ViewModel for dashboard screen.
- *
- * Responsibilities:
- * - Loads routes from [RouteRepository] and exposes a simple (temporary) loading/content/error state.
- *
- */
 @HiltViewModel
 class DashboardViewModel @Inject constructor(
-    private val routeRepository: RouteRepository
+    private val routeRepository: RouteRepository,
+    private val authRepository: AuthRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState(isInitialLoading = true))
     val uiState: StateFlow<DashboardUiState> = _uiState
 
-    // Initial load when the ViewModel is first created.
-    init { loadInitial() }
+    // One-shot event: navigate to login after successful sign-out.
+    private val _signOutEvent = Channel<Unit>(Channel.BUFFERED)
+    val signOutEvent = _signOutEvent.receiveAsFlow()
 
-    /**
-     * Performs first-screen load.
-     */
-    fun loadInitial() {
-        fetchRoutes(isRefresh = false)
-    }
+    init { fetchRoutes(isRefresh = false) }
 
-    /**
-     * Pull-to-refresh / explicit user refresh.
-     */
     fun refresh() {
         fetchRoutes(isRefresh = true)
+    }
+
+    fun signOut() {
+        viewModelScope.launch {
+            authRepository.signOut().onSuccess {
+                _signOutEvent.send(Unit)
+            }.onFailure { e ->
+                _uiState.value = _uiState.value.copy(errorMessage = e.message ?: "Sign out failed")
+            }
+        }
+    }
+
+    fun requestDelete(route: Route) {
+        _uiState.value = _uiState.value.copy(pendingDeleteRoute = route)
+    }
+
+    fun dismissDeleteConfirmation() {
+        _uiState.value = _uiState.value.copy(pendingDeleteRoute = null)
+    }
+
+    fun confirmDelete() {
+        val route = _uiState.value.pendingDeleteRoute ?: return
+        _uiState.value = _uiState.value.copy(pendingDeleteRoute = null, isDeletingRoute = true)
+
+        viewModelScope.launch {
+            try {
+                routeRepository.deleteRoute(route.id)
+                _uiState.value = _uiState.value.copy(
+                    isDeletingRoute = false,
+                    routes = _uiState.value.routes.filterNot { it.id == route.id }
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    isDeletingRoute = false,
+                    errorMessage = e.message ?: "Failed to delete route"
+                )
+            }
+        }
+    }
+
+    fun toggleRouteActive(routeId: String) {
+        val route = _uiState.value.routes.find { it.id == routeId } ?: return
+        val newActive = !route.userActive
+
+        // Optimistic update
+        _uiState.value = _uiState.value.copy(
+            routes = _uiState.value.routes.map { r ->
+                if (r.id == routeId) r.copy(userActive = newActive) else r
+            }
+        )
+
+        viewModelScope.launch {
+            try {
+                routeRepository.updateRoute(routeId = routeId, userActive = newActive)
+            } catch (e: Exception) {
+                // Revert on failure
+                _uiState.value = _uiState.value.copy(
+                    routes = _uiState.value.routes.map { r ->
+                        if (r.id == routeId) r.copy(userActive = route.userActive) else r
+                    },
+                    errorMessage = e.message ?: "Failed to update route"
+                )
+            }
+        }
+    }
+
+    fun toggleDay(routeId: String, day: DayOfWeek) {
+        val route = _uiState.value.routes.find { it.id == routeId } ?: return
+        val oldDays = route.schedule.activeDays
+        val newDays = if (oldDays.contains(day)) oldDays - day else oldDays + day
+        if (newDays.isEmpty()) return // keep at least one active day
+
+        // Optimistic update
+        _uiState.value = _uiState.value.copy(
+            routes = _uiState.value.routes.map { r ->
+                if (r.id == routeId) r.copy(schedule = r.schedule.copy(activeDays = newDays)) else r
+            }
+        )
+
+        viewModelScope.launch {
+            try {
+                routeRepository.updateRoute(
+                    routeId = routeId,
+                    activeDays = newDays,
+                    timezone = route.schedule.timeZoneId
+                )
+            } catch (e: Exception) {
+                // Revert on failure
+                _uiState.value = _uiState.value.copy(
+                    routes = _uiState.value.routes.map { r ->
+                        if (r.id == routeId) r.copy(schedule = r.schedule.copy(activeDays = oldDays)) else r
+                    },
+                    errorMessage = e.message ?: "Failed to update route"
+                )
+            }
+        }
     }
 
     private fun fetchRoutes(isRefresh: Boolean) {
@@ -58,7 +146,6 @@ class DashboardViewModel @Inject constructor(
                     errorMessage = null
                 )
             } catch (e: Exception) {
-                // Keep error messaging user-friendly; the exception message is used as best-effort detail.
                 _uiState.value = _uiState.value.copy(
                     isInitialLoading = false,
                     isRefreshing = false,
