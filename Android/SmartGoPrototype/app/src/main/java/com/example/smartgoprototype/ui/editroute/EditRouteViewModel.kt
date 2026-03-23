@@ -29,9 +29,8 @@ class EditRouteViewModel @Inject constructor(
 
     private fun loadRoute() {
         viewModelScope.launch {
-            runCatching { routeRepository.getRoutes() }
-                .onSuccess { routes ->
-                    val route = routes.find { it.id == routeId }
+            runCatching { routeRepository.getRouteById(routeId) }
+                .onSuccess { route ->
                     if (route != null) {
                         _uiState.value = EditRouteUiState(
                             routeId = route.id,

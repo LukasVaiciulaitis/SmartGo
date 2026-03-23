@@ -1,5 +1,10 @@
 package com.example.smartgoprototype.data.repository
 
+import com.example.smartgoprototype.data.local.dao.RouteDao
+import com.example.smartgoprototype.data.local.entity.RouteEntity
+import com.example.smartgoprototype.data.local.entity.toActiveDaysJson
+import com.example.smartgoprototype.data.local.entity.toDomain
+import com.example.smartgoprototype.data.local.entity.toEntity
 import com.example.smartgoprototype.data.remote.api.RoutesApi
 import com.example.smartgoprototype.data.remote.dto.CreateRouteRequest
 import com.example.smartgoprototype.data.remote.dto.DeleteRouteRequestDto
@@ -17,24 +22,37 @@ import com.example.smartgoprototype.domain.repository.RouteRepository
 import java.io.IOException
 import java.time.DayOfWeek
 import javax.inject.Inject
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import org.json.JSONObject
 import retrofit2.HttpException
 
 /**
- * Retrofit-backed repository.
+ * Offline-first implementation of [RouteRepository].
  *
- * Mapping currently performed inside the repository, considering
- * dedicated mapper class to tidy repository
+ * Room is the single source of truth. All reads go through the local cache via [observeRoutes].
+ * Network calls write their results back to Room, which propagates changes reactively to the UI.
  *
+ * Optimistic writes: mutating operations update Room immediately before the network call. On
+ * network failure the old entity is restored and the exception is re-thrown for the ViewModel
+ * to surface as an error.
  */
 class RouteRepositoryImpl @Inject constructor(
-    private val api: RoutesApi
+    private val api: RoutesApi,
+    private val dao: RouteDao
 ) : RouteRepository {
 
-    override suspend fun getRoutes(): List<Route> {
+    override fun observeRoutes(): Flow<List<Route>> =
+        dao.observeRoutes().map { entities -> entities.map { it.toDomain() } }
+
+    override suspend fun refreshRoutes() {
         val response = executeApiCall { api.getRoutes() }
-        return response.routes.map { it.toDomainRoute() }
+        val entities = response.routes.map { it.toEntity() }
+        dao.replaceAll(entities)
     }
+
+    override suspend fun getRouteById(routeId: String): Route? =
+        dao.getById(routeId)?.toDomain()
 
     override suspend fun addRoute(
         title: String,
@@ -56,8 +74,9 @@ class RouteRepositoryImpl @Inject constructor(
         )
 
         val response = executeApiCall { api.createRoute(request) }
-
-        return response.route.toDomainRoute(fallbackSchedule = schedule, fallbackTravelMode = travelMode)
+        val route = response.route.toDomainRoute(fallbackSchedule = schedule, fallbackTravelMode = travelMode)
+        dao.upsert(route.toEntity())
+        return route
     }
 
     override suspend fun updateRoute(
@@ -69,6 +88,22 @@ class RouteRepositoryImpl @Inject constructor(
         timezone: String?,
         activeDays: Set<DayOfWeek>?
     ) {
+        // Snapshot the current entity so we can revert if the network call fails.
+        val old = dao.getById(routeId)
+
+        if (old != null) {
+            dao.upsert(
+                old.copy(
+                    title = title ?: old.title,
+                    travelMode = travelMode?.name ?: old.travelMode,
+                    userActive = userActive ?: old.userActive,
+                    arriveByMinutes = arriveByMinutes ?: old.arriveByMinutes,
+                    timeZoneId = timezone ?: old.timeZoneId,
+                    activeDaysJson = activeDays?.toActiveDaysJson() ?: old.activeDaysJson
+                )
+            )
+        }
+
         val request = UpdateRouteRequestDto(
             routeId = routeId,
             title = title?.trim(),
@@ -79,109 +114,57 @@ class RouteRepositoryImpl @Inject constructor(
             daysOfWeek = activeDays?.toBackendDays()
         )
 
-        executeApiCall { api.updateRoute(request) }
+        try {
+            executeApiCall { api.updateRoute(request) }
+        } catch (e: Exception) {
+            if (old != null) dao.upsert(old)
+            throw e
+        }
     }
 
     override suspend fun deleteRoute(routeId: String) {
-        val request = DeleteRouteRequestDto(routeId = routeId)
-        executeApiCall { api.deleteRoute(request) }
-    }
+        val old = dao.getById(routeId)
+        dao.deleteById(routeId)
 
-    private fun PlaceLocation.toEndpointPlace(requireComponents: Boolean): EndpointPlace {
-        val components = addressComponents
-            .orEmpty()
-            .mapNotNull { component ->
-                val sanitizedTypes = component.types.filter { it.isNotBlank() }
-                if (sanitizedTypes.isEmpty()) return@mapNotNull null
-                component.copy(types = sanitizedTypes)
-            }
-
-        if (requireComponents && components.isEmpty()) {
-            throw IllegalStateException("addressComponents missing or invalid for placeId=$placeId")
+        try {
+            executeApiCall { api.deleteRoute(DeleteRouteRequestDto(routeId = routeId)) }
+        } catch (e: Exception) {
+            if (old != null) dao.upsert(old)
+            throw e
         }
-
-        return EndpointPlace(
-            placeId = placeId,
-            label = label,
-            addressComponents = components.map {
-                GoogleAddressComponentDto(
-                    longText = it.longText,
-                    shortText = it.shortText,
-                    types = it.types
-                )
-            }
-        )
     }
 
-    private fun PlaceLocation.toIntermediate(): IntermediatePlace =
-        IntermediatePlace(
-            placeId = placeId,
-            label = label
-        )
+    // --- DTO mapping ---
 
-    private fun Int.toArriveByHHmm(): String {
-        val h = this / 60
-        val m = this % 60
-        return "%02d:%02d".format(h, m)
-    }
-
-    private fun Set<DayOfWeek>.toBackendDays(): List<String> {
-        val order = listOf(
-            DayOfWeek.MONDAY,
-            DayOfWeek.TUESDAY,
-            DayOfWeek.WEDNESDAY,
-            DayOfWeek.THURSDAY,
-            DayOfWeek.FRIDAY,
-            DayOfWeek.SATURDAY,
-            DayOfWeek.SUNDAY
-        )
-
-        return order.filter { contains(it) }.map { it.name.take(3) }
-    }
-
-    private fun RouteCreatedDto.toDomainRoute(fallbackSchedule: RouteSchedule, fallbackTravelMode: TravelMode): Route {
-        val mappedSchedule = schedule.toDomainScheduleOrNull() ?: fallbackSchedule
-        return Route(
-            id = routeId,
-            title = title,
-            origin = PlaceLocation(
-                placeId = origin.placeId,
-                label = origin.label,
-                addressComponents = null
-            ),
-            destination = PlaceLocation(
-                placeId = destination.placeId,
-                label = destination.label,
-                addressComponents = null
-            ),
-            travelMode = travelMode.toDomainTravelMode() ?: fallbackTravelMode,
-            userActive = true,
-            schedule = mappedSchedule
-        )
-    }
-
-    private fun FetchedRouteDto.toDomainRoute(): Route {
-        val mappedSchedule = schedule.toDomainScheduleOrNull() ?: RouteSchedule(
+    private fun FetchedRouteDto.toEntity(): RouteEntity {
+        val schedule = schedule.toDomainScheduleOrNull() ?: RouteSchedule(
             arriveByMinutes = 9 * 60,
             activeDays = emptySet(),
             timeZoneId = "UTC"
         )
-
         return Route(
             id = routeId,
             title = title,
-            origin = PlaceLocation(
-                placeId = origin.placeId,
-                label = origin.label,
-                addressComponents = null
-            ),
-            destination = PlaceLocation(
-                placeId = destination.placeId,
-                label = destination.label,
-                addressComponents = null
-            ),
+            origin = PlaceLocation(placeId = origin.placeId, label = origin.label),
+            destination = PlaceLocation(placeId = destination.placeId, label = destination.label),
             travelMode = travelMode.toDomainTravelMode() ?: TravelMode.DRIVE,
             userActive = userActive ?: true,
+            schedule = schedule
+        ).toEntity()
+    }
+
+    private fun RouteCreatedDto.toDomainRoute(
+        fallbackSchedule: RouteSchedule,
+        fallbackTravelMode: TravelMode
+    ): Route {
+        val mappedSchedule = schedule.toDomainScheduleOrNull() ?: fallbackSchedule
+        return Route(
+            id = routeId,
+            title = title,
+            origin = PlaceLocation(placeId = origin.placeId, label = origin.label),
+            destination = PlaceLocation(placeId = destination.placeId, label = destination.label),
+            travelMode = travelMode.toDomainTravelMode() ?: fallbackTravelMode,
+            userActive = true,
             schedule = mappedSchedule
         )
     }
@@ -209,16 +192,57 @@ class RouteRepositoryImpl @Inject constructor(
 
     private fun List<String>.toDomainDays(): Set<DayOfWeek> {
         val map = mapOf(
-            "MON" to DayOfWeek.MONDAY,
-            "TUE" to DayOfWeek.TUESDAY,
-            "WED" to DayOfWeek.WEDNESDAY,
-            "THU" to DayOfWeek.THURSDAY,
-            "FRI" to DayOfWeek.FRIDAY,
-            "SAT" to DayOfWeek.SATURDAY,
-            "SUN" to DayOfWeek.SUNDAY
+            "MON" to DayOfWeek.MONDAY, "TUE" to DayOfWeek.TUESDAY, "WED" to DayOfWeek.WEDNESDAY,
+            "THU" to DayOfWeek.THURSDAY, "FRI" to DayOfWeek.FRIDAY,
+            "SAT" to DayOfWeek.SATURDAY, "SUN" to DayOfWeek.SUNDAY
         )
         return mapNotNull { map[it] }.toSet()
     }
+
+    // --- PlaceLocation helpers ---
+
+    private fun PlaceLocation.toEndpointPlace(requireComponents: Boolean): EndpointPlace {
+        val components = addressComponents
+            .orEmpty()
+            .mapNotNull { component ->
+                val sanitizedTypes = component.types.filter { it.isNotBlank() }
+                if (sanitizedTypes.isEmpty()) return@mapNotNull null
+                component.copy(types = sanitizedTypes)
+            }
+
+        if (requireComponents && components.isEmpty()) {
+            throw IllegalStateException("addressComponents missing or invalid for placeId=$placeId")
+        }
+
+        return EndpointPlace(
+            placeId = placeId,
+            label = label,
+            addressComponents = components.map {
+                GoogleAddressComponentDto(longText = it.longText, shortText = it.shortText, types = it.types)
+            }
+        )
+    }
+
+    private fun PlaceLocation.toIntermediate(): IntermediatePlace =
+        IntermediatePlace(placeId = placeId, label = label)
+
+    // --- Formatting helpers ---
+
+    private fun Int.toArriveByHHmm(): String {
+        val h = this / 60
+        val m = this % 60
+        return "%02d:%02d".format(h, m)
+    }
+
+    private fun Set<DayOfWeek>.toBackendDays(): List<String> {
+        val order = listOf(
+            DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY,
+            DayOfWeek.THURSDAY, DayOfWeek.FRIDAY, DayOfWeek.SATURDAY, DayOfWeek.SUNDAY
+        )
+        return order.filter { contains(it) }.map { it.name.take(3) }
+    }
+
+    // --- Error handling ---
 
     private suspend fun <T> executeApiCall(block: suspend () -> T): T {
         return try {

@@ -4,15 +4,15 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.smartgoprototype.domain.model.Route
 import com.example.smartgoprototype.domain.repository.AuthRepository
-import java.time.DayOfWeek
 import com.example.smartgoprototype.domain.repository.RouteRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import java.time.DayOfWeek
+import javax.inject.Inject
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
-import javax.inject.Inject
 
 @HiltViewModel
 class DashboardViewModel @Inject constructor(
@@ -27,11 +27,12 @@ class DashboardViewModel @Inject constructor(
     private val _signOutEvent = Channel<Unit>(Channel.BUFFERED)
     val signOutEvent = _signOutEvent.receiveAsFlow()
 
-    init { fetchRoutes(isRefresh = false) }
-
-    fun refresh() {
-        fetchRoutes(isRefresh = true)
+    init {
+        collectRoutes()
+        refreshRoutes()
     }
+
+    fun refresh() = refreshRoutes()
 
     fun signOut() {
         viewModelScope.launch {
@@ -57,42 +58,27 @@ class DashboardViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
+                // Room removes the route immediately (optimistic); the Flow re-emits automatically.
+                // On failure the repo re-inserts the entity and throws, so we just show the error.
                 routeRepository.deleteRoute(route.id)
-                _uiState.value = _uiState.value.copy(
-                    isDeletingRoute = false,
-                    routes = _uiState.value.routes.filterNot { it.id == route.id }
-                )
             } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(
-                    isDeletingRoute = false,
-                    errorMessage = e.message ?: "Failed to delete route"
-                )
+                _uiState.value = _uiState.value.copy(errorMessage = e.message ?: "Failed to delete route")
+            } finally {
+                _uiState.value = _uiState.value.copy(isDeletingRoute = false)
             }
         }
     }
 
     fun toggleRouteActive(routeId: String) {
         val route = _uiState.value.routes.find { it.id == routeId } ?: return
-        val newActive = !route.userActive
-
-        // Optimistic update
-        _uiState.value = _uiState.value.copy(
-            routes = _uiState.value.routes.map { r ->
-                if (r.id == routeId) r.copy(userActive = newActive) else r
-            }
-        )
 
         viewModelScope.launch {
             try {
-                routeRepository.updateRoute(routeId = routeId, userActive = newActive)
+                // The repo writes to Room first, which drives the UI update via the Flow.
+                // On failure the repo reverts the local write and re-throws.
+                routeRepository.updateRoute(routeId = routeId, userActive = !route.userActive)
             } catch (e: Exception) {
-                // Revert on failure
-                _uiState.value = _uiState.value.copy(
-                    routes = _uiState.value.routes.map { r ->
-                        if (r.id == routeId) r.copy(userActive = route.userActive) else r
-                    },
-                    errorMessage = e.message ?: "Failed to update route"
-                )
+                _uiState.value = _uiState.value.copy(errorMessage = e.message ?: "Failed to update route")
             }
         }
     }
@@ -101,14 +87,7 @@ class DashboardViewModel @Inject constructor(
         val route = _uiState.value.routes.find { it.id == routeId } ?: return
         val oldDays = route.schedule.activeDays
         val newDays = if (oldDays.contains(day)) oldDays - day else oldDays + day
-        if (newDays.isEmpty()) return // keep at least one active day
-
-        // Optimistic update
-        _uiState.value = _uiState.value.copy(
-            routes = _uiState.value.routes.map { r ->
-                if (r.id == routeId) r.copy(schedule = r.schedule.copy(activeDays = newDays)) else r
-            }
-        )
+        if (newDays.isEmpty()) return
 
         viewModelScope.launch {
             try {
@@ -118,39 +97,33 @@ class DashboardViewModel @Inject constructor(
                     timezone = route.schedule.timeZoneId
                 )
             } catch (e: Exception) {
-                // Revert on failure
-                _uiState.value = _uiState.value.copy(
-                    routes = _uiState.value.routes.map { r ->
-                        if (r.id == routeId) r.copy(schedule = r.schedule.copy(activeDays = oldDays)) else r
-                    },
-                    errorMessage = e.message ?: "Failed to update route"
-                )
+                _uiState.value = _uiState.value.copy(errorMessage = e.message ?: "Failed to update route")
             }
         }
     }
 
-    private fun fetchRoutes(isRefresh: Boolean) {
-        _uiState.value = _uiState.value.copy(
-            isInitialLoading = !isRefresh,
-            isRefreshing = isRefresh,
-            errorMessage = null
-        )
+    /**
+     * Continuously collects the Room Flow. Any cache write (refresh, add, update, delete)
+     * automatically propagates here and updates the UI without further intervention.
+     */
+    private fun collectRoutes() {
+        viewModelScope.launch {
+            routeRepository.observeRoutes().collect { routes ->
+                _uiState.value = _uiState.value.copy(routes = routes, isInitialLoading = false)
+            }
+        }
+    }
+
+    private fun refreshRoutes() {
+        _uiState.value = _uiState.value.copy(isRefreshing = true, errorMessage = null)
 
         viewModelScope.launch {
             try {
-                val routes = routeRepository.getRoutes()
-                _uiState.value = _uiState.value.copy(
-                    isInitialLoading = false,
-                    isRefreshing = false,
-                    routes = routes,
-                    errorMessage = null
-                )
+                routeRepository.refreshRoutes()
             } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(
-                    isInitialLoading = false,
-                    isRefreshing = false,
-                    errorMessage = e.message ?: "Failed to load routes"
-                )
+                _uiState.value = _uiState.value.copy(errorMessage = e.message ?: "Failed to load routes")
+            } finally {
+                _uiState.value = _uiState.value.copy(isRefreshing = false)
             }
         }
     }

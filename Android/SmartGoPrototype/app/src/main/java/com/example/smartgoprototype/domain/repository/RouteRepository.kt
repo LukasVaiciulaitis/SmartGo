@@ -5,10 +5,24 @@ import com.example.smartgoprototype.domain.model.Route
 import com.example.smartgoprototype.domain.model.RouteSchedule
 import com.example.smartgoprototype.domain.model.TravelMode
 import java.time.DayOfWeek
+import kotlinx.coroutines.flow.Flow
 
 interface RouteRepository {
 
-    suspend fun getRoutes(): List<Route>
+    /**
+     * Observes the local Room cache. Emits a new list whenever the cache changes.
+     * Room is the single source of truth — the UI never reads directly from the network.
+     */
+    fun observeRoutes(): Flow<List<Route>>
+
+    /**
+     * Fetches routes from the network and overwrites the local cache.
+     * Throws on network failure so the caller can surface an error.
+     */
+    suspend fun refreshRoutes()
+
+    /** Returns a single cached route by ID, or null if not found. */
+    suspend fun getRouteById(routeId: String): Route?
 
     suspend fun addRoute(
         title: String,
