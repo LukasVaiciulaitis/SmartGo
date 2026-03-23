@@ -26,8 +26,9 @@ exports.handler = async (event) => {
         TableName: USER_ROUTE_TABLE,
         KeyConditionExpression: 'userId = :uid',
         ExpressionAttributeValues: marshall({ ':uid': userId }),
+        ExpressionAttributeNames: { '#timezone': 'timezone' },
         // Exclude `steps` — large TRANSIT stop data only needed by delayWorker, not this response
-        ProjectionExpression: 'userId, recordType, routeId, title, cityOrigin, cityDestination, cityIntermediates, userActive, origin, intermediates, destination, geometry, travelMode, staticDuration, trafficDuration, distanceMeters, createdAt, updatedAt, arriveBy, timezone, daysOfWeek, days, generatedAt, email',
+        ProjectionExpression: 'userId, recordType, routeId, title, cityOrigin, cityDestination, cityIntermediates, userActive, origin, intermediates, destination, geometry, travelMode, staticDuration, trafficDuration, distanceMeters, createdAt, updatedAt, arriveBy, #timezone, daysOfWeek, days, generatedAt, email',
         ExclusiveStartKey: lastEvaluatedKey
       }));
 
