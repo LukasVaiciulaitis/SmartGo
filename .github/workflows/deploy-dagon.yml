@@ -1,0 +1,36 @@
+name: Deploy Dagon
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dagon/**'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-2
+
+      - uses: aws-actions/setup-sam@v2
+
+      - run: sam build
+        working-directory: Dagon
+
+      - run: |
+          sam deploy \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              GoogleRoutesApiKey=${{ secrets.GOOGLE_ROUTES_API_KEY }} \
+              OpenWeatherApiKey=${{ secrets.OPEN_WEATHER_API_KEY }}
+        working-directory: Dagon

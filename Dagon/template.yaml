@@ -1,0 +1,386 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Dagon commuter data pipeline -- EventBridge-triggered orchestrator fans out runners
+  via SQS across 5 commute windows. Each worker calls Google Routes API + OpenWeather
+  and writes a CSV row directly to S3. A daily consolidator merges all raw fragments
+  into one CSV per day after the evening window closes.
+
+Parameters:
+  GoogleRoutesApiKey:
+    Type: String
+    NoEcho: true
+    Description: >
+      Google Routes API key for traffic-aware route duration polling in dagonWorker.
+      Pass via --parameter-overrides at deploy time or samconfig.toml parameter_overrides.
+
+  OpenWeatherApiKey:
+    Type: String
+    NoEcho: true
+    Description: >
+      OpenWeatherMap API key for origin-point weather enrichment in dagonWorker.
+      Pass via --parameter-overrides at deploy time or samconfig.toml parameter_overrides.
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Layers:
+      - !Ref UtilsLayer
+
+Resources:
+
+  # -------------------------------
+  # LAMBDA LAYERS
+  # -------------------------------
+  UtilsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: dagon-utils
+      Description: Shared utilities for Dagon pipeline -- chunkArray, callWithRetry
+      ContentUri: src/shared/
+      CompatibleRuntimes:
+        - nodejs20.x
+      RetentionPolicy: Delete
+
+  # -------------------------------
+  # IAM -- per-function roles (least privilege)
+  # -------------------------------
+
+  # dagonOrchestrator: scans runnerConfigDB, enqueues runner configs to SQS.
+  dagonOrchestratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dagon-orchestrator-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource:
+                  - !GetAtt runnerConfigDB.Arn
+                  - !Sub ${runnerConfigDB.Arn}/index/departureTimeUTC-index
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt dagonWorkerQueue.Arn
+
+  # dagonWorker: consumes SQS, calls Google Routes + OpenWeather, writes CSV row to S3.
+  dagonWorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dagon-worker-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt dagonWorkerQueue.Arn
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${dagonDataBucket.Arn}/raw/*
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dagon/googleRoutesApiKey
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dagon/openWeatherApiKey
+
+  # dagonConsolidator: lists raw fragments, concatenates into one daily CSV, deletes raw.
+  dagonConsolidatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dagon-consolidator-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt dagonDataBucket.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub ${dagonDataBucket.Arn}/*
+
+  # -------------------------------
+  # SSM PARAMETERS
+  # API keys protected by IAM -- only dagonWorkerRole can read these parameters.
+  # -------------------------------
+  GoogleRoutesApiKeyParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /dagon/googleRoutesApiKey
+      Type: String
+      Value: !Ref GoogleRoutesApiKey
+      Description: Google Routes API key for traffic-aware route polling in dagonWorker
+
+  OpenWeatherApiKeyParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /dagon/openWeatherApiKey
+      Type: String
+      Value: !Ref OpenWeatherApiKey
+      Description: OpenWeatherMap API key for origin-point weather enrichment in dagonWorker
+
+  # -------------------------------
+  # DYNAMODB -- runnerConfigDB
+  # PK: runnerId
+  # GSI: departureTimeUTC (for efficient per-slot querying by dagonOrchestrator)
+  # Each item represents one person abstraction with a fixed origin, destination,
+  # UTC departure time, and leg type. Populated once at setup; rarely changes.
+  # -------------------------------
+  runnerConfigDB:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: runnerConfigDB
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: runnerId
+          AttributeType: S
+        - AttributeName: departureTimeUTC
+          AttributeType: S
+      KeySchema:
+        - AttributeName: runnerId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: departureTimeUTC-index
+          KeySchema:
+            - AttributeName: departureTimeUTC
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+
+  # -------------------------------
+  # SQS -- dagon worker queue
+  # No DLQ -- this is a disposable data scraping pipeline.
+  # Failed runners are silently dropped after 3 visibility-timeout retries.
+  # -------------------------------
+  dagonWorkerQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: dagonWorkerQueue
+      VisibilityTimeout: 30            # Must be >= Lambda timeout (30s)
+      MessageRetentionPeriod: 86400    # 1 day -- messages are per-window only
+
+  # -------------------------------
+  # S3 -- dagon data bucket
+  # raw/date=YYYY-MM-DD/{runnerId}.csv  -- written by dagonWorker, deleted after consolidation
+  # consolidated/date=YYYY-MM-DD/commutes.csv -- written by dagonConsolidator, kept for ML training
+  # -------------------------------
+  dagonDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub dagon-data-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # -------------------------------
+  # BATCH LAMBDAS
+  # -------------------------------
+
+  # Triggered by EventBridge across 5 daily windows.
+  # Scans runnerConfigDB for runners matching the current commuteWindow,
+  # then fans them out to SQS in batches of 10 (SendMessageBatch limit).
+  dagonOrchestratorLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: dagonOrchestrator
+      CodeUri: src/batch/dagonOrchestrator/
+      Handler: dagonOrchestrator.handler
+      Role: !GetAtt dagonOrchestratorRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          RUNNER_CONFIG_TABLE: !Ref runnerConfigDB
+          DAGON_WORKER_QUEUE_URL: !Ref dagonWorkerQueue
+
+  # SQS-triggered, one invocation per commuter runner.
+  # Calls Google Routes API (traffic-aware) + OpenWeather, writes one CSV row to S3.
+  dagonWorkerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: dagonWorker
+      CodeUri: src/batch/dagonWorker/
+      Handler: dagonWorker.handler
+      Role: !GetAtt dagonWorkerRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref dagonDataBucket
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt dagonWorkerQueue.Arn
+            BatchSize: 1               # One commuter runner per Lambda invocation
+            ScalingConfig:
+              MaximumConcurrency: 50   # Max 50 concurrent worker Lambdas
+
+  # -------------------------------
+  # EVENTBRIDGE -- every 5 minutes within each window (all times UTC)
+  #
+  #   MorningWindowRule  cron(0/5 7-9 * * ? *)   fires 07:00-09:55 (36 times)
+  #   EveningWindowRule  cron(0/5 16-18 * * ? *)  fires 16:00-18:55 (36 times)
+  #
+  # Windows are intentionally one hour wider than the expected runner range so
+  # that runners at the boundary (e.g. 09:00, 18:00) are never silently dropped.
+  # Firings with no matching runners are a no-op -- the orchestrator logs and returns.
+  #
+  # The orchestrator derives the exact 5-minute slot from event.time (the
+  # EventBridge scheduled time) -- not Date.now() -- to avoid Lambda cold-start
+  # jitter corrupting the slot calculation.
+  # -------------------------------
+  MorningWindowRule:
+    Type: AWS::Events::Rule
+    DependsOn: dagonOrchestratorLambda
+    Properties:
+      Name: dagonMorningWindowSchedule
+      Description: "Every 5 min, 07:00-09:55 UTC -- morningCommute slots"
+      ScheduleExpression: cron(0/5 7-9 * * ? *)
+      State: ENABLED
+      Targets:
+        - Id: morningWindowTarget
+          Arn: !GetAtt dagonOrchestratorLambda.Arn
+          Input: '{"legType": "morningCommute"}'
+
+  EveningWindowRule:
+    Type: AWS::Events::Rule
+    DependsOn: dagonOrchestratorLambda
+    Properties:
+      Name: dagonEveningWindowSchedule
+      Description: "Every 5 min, 16:00-18:55 UTC -- eveningReturn slots"
+      ScheduleExpression: cron(0/5 16-18 * * ? *)
+      State: ENABLED
+      Targets:
+        - Id: eveningWindowTarget
+          Arn: !GetAtt dagonOrchestratorLambda.Arn
+          Input: '{"legType": "eveningReturn"}'
+
+  MorningWindowLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt dagonOrchestratorLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MorningWindowRule.Arn
+
+  EveningWindowLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt dagonOrchestratorLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EveningWindowRule.Arn
+
+  # Reads all raw fragments for today, concatenates into one daily CSV, deletes raw files.
+  # Triggered at 18:10 UTC -- 15 minutes after the last evening slot (17:55) fires,
+  # giving all workers (30s timeout) time to complete with margin.
+  dagonConsolidatorLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: dagonConsolidator
+      CodeUri: src/batch/dagonConsolidator/
+      Handler: dagonConsolidator.handler
+      Role: !GetAtt dagonConsolidatorRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref dagonDataBucket
+
+  # -------------------------------
+  # EVENTBRIDGE -- daily consolidation (all times UTC)
+  #
+  #   ConsolidatorRule  cron(10 18 * * ? *)  fires 18:10 -- after evening window closes (17:55)
+  # -------------------------------
+  ConsolidatorRule:
+    Type: AWS::Events::Rule
+    DependsOn: dagonConsolidatorLambda
+    Properties:
+      Name: dagonConsolidatorSchedule
+      Description: "18:10 UTC daily -- consolidate raw CSV fragments into one daily file"
+      ScheduleExpression: cron(10 18 * * ? *)
+      State: ENABLED
+      Targets:
+        - Id: consolidatorTarget
+          Arn: !GetAtt dagonConsolidatorLambda.Arn
+
+  ConsolidatorLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt dagonConsolidatorLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ConsolidatorRule.Arn
+
+Outputs:
+  dagonDataBucketName:
+    Description: S3 bucket -- raw fragments written by dagonWorker, consolidated CSV by dagonConsolidator
+    Value: !Ref dagonDataBucket
+
+  RunnerConfigTableName:
+    Description: DynamoDB table for runner configurations
+    Value: !Ref runnerConfigDB
+
+  dagonWorkerQueueUrl:
+    Description: SQS queue URL for runner invocations
+    Value: !Ref dagonWorkerQueue
