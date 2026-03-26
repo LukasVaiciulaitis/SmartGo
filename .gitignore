@@ -6,6 +6,13 @@
 # SAM build output
 .aws-sam/
 
+### Tests ###
+
+**/tests/
+**/.tests/
+**/androidTest/
+**/test/
+
 ### Backend ###
 
 # Node Packages

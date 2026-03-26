@@ -22,7 +22,7 @@ import javax.inject.Singleton
 object NetworkModule {
 
     //TODO: move this to BuildConfig
-    private const val BASE_URL = "https://6az3vr0y5j.execute-api.us-east-1.amazonaws.com/prod/"
+    private const val BASE_URL = "https://fageb0w7v2.execute-api.eu-west-1.amazonaws.com/prod/"
 
     @Provides
     @Singleton
