@@ -3,6 +3,8 @@ name: Deploy SAM
 on:
   push:
     branches: [main]
+    paths:
+      - 'Backend/**'
 
 permissions:
   id-token: write
