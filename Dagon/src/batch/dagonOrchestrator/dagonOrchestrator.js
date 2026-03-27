@@ -25,13 +25,22 @@ const DAGON_WORKER_QUEUE_URL = process.env.DAGON_WORKER_QUEUE_URL;
 
 // ─── Slot Calculation ─────────────────────────────────────────────────────────
 
-// Derive the current 5-minute departure slot from the EventBridge scheduled time.
-// Uses event.time (e.g. "2026-03-26T07:35:00Z") rather than Date.now() so that
-// Lambda cold-start delay does not shift the computed slot to the wrong bin.
+// Derive the current 5-minute departure slot in Dublin local time.
+// Converts the EventBridge scheduled time (UTC) to Europe/Dublin via Intl so that
+// DST transitions (UTC+0 in winter, UTC+1 in summer) are handled automatically.
+// Falls back to Date.now() when event.time is absent -- this happens when EventBridge
+// uses a custom Input override, which replaces the default event payload entirely.
 const getSlotFromEvent = (eventTime) => {
-  const scheduled = new Date(eventTime);
-  const hh = String(scheduled.getUTCHours()).padStart(2, '0');
-  const mm = String(Math.floor(scheduled.getUTCMinutes() / 5) * 5).padStart(2, '0');
+  const scheduled = new Date(eventTime ?? Date.now());
+  const parts = new Intl.DateTimeFormat('en-IE', {
+    timeZone: 'Europe/Dublin',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(scheduled);
+  const hh = parts.find(p => p.type === 'hour').value.padStart(2, '0');
+  const rawMin = parseInt(parts.find(p => p.type === 'minute').value, 10);
+  const mm = String(Math.floor(rawMin / 5) * 5).padStart(2, '0');
   return `${hh}:${mm}`;
 };
 
@@ -96,8 +105,8 @@ exports.handler = async (event) => {
     do {
       const result = await dynamo.send(new QueryCommand({
         TableName: RUNNER_CONFIG_TABLE,
-        IndexName: 'departureTimeUTC-index',
-        KeyConditionExpression: 'departureTimeUTC = :slot',
+        IndexName: 'departureTimeLocal-index',
+        KeyConditionExpression: 'departureTimeLocal = :slot',
         ExpressionAttributeValues: marshall({ ':slot': currentSlot }),
         ExclusiveStartKey: lastEvaluatedKey
       }));

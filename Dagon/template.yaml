@@ -158,9 +158,9 @@ Resources:
   # -------------------------------
   # DYNAMODB -- runnerConfigDB
   # PK: runnerId
-  # GSI: departureTimeUTC (for efficient per-slot querying by dagonOrchestrator)
+  # GSI: departureTimeLocal (for efficient per-slot querying by dagonOrchestrator)
   # Each item represents one person abstraction with a fixed origin, destination,
-  # UTC departure time, and leg type. Populated once at setup; rarely changes.
+  # Dublin local departure time, and leg type. Populated once at setup; rarely changes.
   # -------------------------------
   runnerConfigDB:
     Type: AWS::DynamoDB::Table
@@ -170,15 +170,15 @@ Resources:
       AttributeDefinitions:
         - AttributeName: runnerId
           AttributeType: S
-        - AttributeName: departureTimeUTC
+        - AttributeName: departureTimeLocal
           AttributeType: S
       KeySchema:
         - AttributeName: runnerId
           KeyType: HASH
       GlobalSecondaryIndexes:
-        - IndexName: departureTimeUTC-index
+        - IndexName: departureTimeLocal-index
           KeySchema:
-            - AttributeName: departureTimeUTC
+            - AttributeName: departureTimeLocal
               KeyType: HASH
           Projection:
             ProjectionType: ALL
@@ -263,12 +263,13 @@ Resources:
   # -------------------------------
   # EVENTBRIDGE -- every 5 minutes within each window (all times UTC)
   #
-  #   MorningWindowRule  cron(0/5 7-9 * * ? *)   fires 07:00-09:55 (36 times)
-  #   EveningWindowRule  cron(0/5 16-18 * * ? *)  fires 16:00-18:55 (36 times)
+  #   MorningWindowRule  cron(0/5 6-9 * * ? *)   fires 06:00-09:55 (48 times)
+  #   EveningWindowRule  cron(0/5 15-18 * * ? *)  fires 15:00-18:55 (48 times)
   #
-  # Windows are intentionally one hour wider than the expected runner range so
-  # that runners at the boundary (e.g. 09:00, 18:00) are never silently dropped.
-  # Firings with no matching runners are a no-op -- the orchestrator logs and returns.
+  # Windows are widened to cover both Dublin GMT (UTC+0) and IST (UTC+1) so that
+  # DST transitions don't drop runners at the boundary hours. The orchestrator
+  # converts UTC fire time to Europe/Dublin local before querying -- firings outside
+  # the active runner window are no-ops.
   #
   # The orchestrator derives the exact 5-minute slot from event.time (the
   # EventBridge scheduled time) -- not Date.now() -- to avoid Lambda cold-start
@@ -279,8 +280,8 @@ Resources:
     DependsOn: dagonOrchestratorLambda
     Properties:
       Name: dagonMorningWindowSchedule
-      Description: "Every 5 min, 07:00-09:55 UTC -- morningCommute slots"
-      ScheduleExpression: cron(0/5 7-9 * * ? *)
+      Description: "Every 5 min, 06:00-09:55 UTC -- morningCommute slots (covers Dublin GMT+IST)"
+      ScheduleExpression: cron(0/5 6-9 * * ? *)
       State: ENABLED
       Targets:
         - Id: morningWindowTarget
@@ -292,8 +293,8 @@ Resources:
     DependsOn: dagonOrchestratorLambda
     Properties:
       Name: dagonEveningWindowSchedule
-      Description: "Every 5 min, 16:00-18:55 UTC -- eveningReturn slots"
-      ScheduleExpression: cron(0/5 16-18 * * ? *)
+      Description: "Every 5 min, 15:00-18:55 UTC -- eveningReturn slots (covers Dublin GMT+IST)"
+      ScheduleExpression: cron(0/5 15-18 * * ? *)
       State: ENABLED
       Targets:
         - Id: eveningWindowTarget

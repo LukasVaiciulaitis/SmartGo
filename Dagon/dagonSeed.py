@@ -80,7 +80,7 @@ def generate_static_master_seed(total_users=1000):
             "originLng":        h_loc["lng"],
             "destLat":          w_loc["lat"],
             "destLng":          w_loc["lng"],
-            "departureTimeUTC": get_static_utc_bin(7)
+            "departureTimeLocal": get_static_utc_bin(7)
         })
 
         # Leg 2: Evening return (16:00-17:55 UTC window, aligns with 16:00 EventBridge trigger)
@@ -93,7 +93,7 @@ def generate_static_master_seed(total_users=1000):
             "originLng":        w_loc["lng"],
             "destLat":          h_loc["lat"],
             "destLng":          h_loc["lng"],
-            "departureTimeUTC": get_static_utc_bin(16)
+            "departureTimeLocal": get_static_utc_bin(16)
         })
 
     return master_records
