@@ -26,9 +26,9 @@ DESTINATION_HUBS = {
     ]
 }
 
-def get_static_utc_bin(window_start_hour):
+def get_static_local_bin(window_start_hour):
     """
-    Returns a fixed 5-minute UTC departure time within a 2-hour window
+    Returns a fixed 5-minute Dublin local departure time within a 2-hour window
     as an "HH:MM" string. Window covers window_start_hour to window_start_hour+1h55m.
     """
     random_minute = (random.randint(0, 115) // 5) * 5
@@ -70,7 +70,7 @@ def generate_static_master_seed(total_users=1000):
         h_loc = get_jitter((home_coord['lat'], home_coord['lng']))
         w_loc = get_jitter(work_coord)
 
-        # Leg 1: Morning commute (07:00-08:55 UTC window, aligns with 07:00 EventBridge trigger)
+        # Leg 1: Morning commute (07:00-08:55 Dublin local, EventBridge fires 06:00-09:55 UTC)
         master_records.append({
             "runnerId":         f"{user_id}-L1",
             "userId":           user_id,
@@ -80,10 +80,10 @@ def generate_static_master_seed(total_users=1000):
             "originLng":        h_loc["lng"],
             "destLat":          w_loc["lat"],
             "destLng":          w_loc["lng"],
-            "departureTimeLocal": get_static_utc_bin(7)
+            "departureTimeLocal": get_static_local_bin(7)
         })
 
-        # Leg 2: Evening return (16:00-17:55 UTC window, aligns with 16:00 EventBridge trigger)
+        # Leg 2: Evening return (16:00-17:55 Dublin local, EventBridge fires 15:00-18:55 UTC)
         master_records.append({
             "runnerId":         f"{user_id}-L2",
             "userId":           user_id,
@@ -93,7 +93,7 @@ def generate_static_master_seed(total_users=1000):
             "originLng":        w_loc["lng"],
             "destLat":          h_loc["lat"],
             "destLng":          h_loc["lng"],
-            "departureTimeLocal": get_static_utc_bin(16)
+            "departureTimeLocal": get_static_local_bin(16)
         })
 
     return master_records

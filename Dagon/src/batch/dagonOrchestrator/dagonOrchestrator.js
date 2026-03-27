@@ -1,16 +1,12 @@
 // dagonOrchestrator.js
-// Triggered by EventBridge every 5 minutes within the morning (07:00-09:55 UTC)
-// and evening (16:00-18:55 UTC) windows. Windows are one hour wider than the
-// expected runner range so boundary slots (e.g. 09:00, 18:00) are never dropped.
+// Triggered by EventBridge every 5 minutes within the morning (06:00-09:55 UTC)
+// and evening (15:00-18:55 UTC) windows. Windows cover both Dublin GMT (UTC+0) and
+// IST (UTC+1) so DST transitions never drop boundary slots.
 // Firings with no matching runners are a no-op.
 //
-// Each firing derives the current 5-minute slot from event.time -- the EventBridge
-// scheduled time -- rather than Date.now(). This eliminates Lambda cold-start jitter:
-// event.time is always exactly on the scheduled boundary regardless of when the
-// container actually starts.
-//
-// Queries runnerConfigDB via the departureTimeUTC GSI to efficiently retrieve only
-// the runners assigned to this slot, then fans them out to SQS for dagonWorker.
+// Each firing converts the current UTC time to Europe/Dublin local time via Intl,
+// then queries runnerConfigDB via the departureTimeLocal GSI to retrieve only the
+// runners assigned to this slot, then fans them out to SQS for dagonWorker.
 
 const { DynamoDBClient, QueryCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
@@ -97,7 +93,7 @@ exports.handler = async (event) => {
   console.log(`dagonOrchestrator invoked -- legType="${legType}" slot="${currentSlot}"`);
 
   try {
-    // Query the departureTimeUTC GSI to retrieve only runners for this exact slot.
+    // Query the departureTimeLocal GSI to retrieve only runners for this exact slot.
     // Avoids a full table scan every 5 minutes.
     let runners = [];
     let lastEvaluatedKey = undefined;

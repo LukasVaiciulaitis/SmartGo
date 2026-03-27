@@ -8,7 +8,7 @@
 //
 // One consolidated CSV per day -- all morning and evening commute rows combined.
 // Schema (header written here, data rows written by dagonWorker):
-//   runnerId, userId, persona, legType, pollDate, dayOfWeek, departureTimeUTC,
+//   runnerId, userId, persona, legType, pollDate, dayOfWeek, departureTimeLocal,
 //   originLat, originLng, destLat, destLng,
 //   distanceMeters, predictedDurationSeconds, staticDurationSeconds,
 //   weatherCondition, weatherTempC, weatherPrecipMm, weatherWindKph
@@ -62,7 +62,7 @@ exports.handler = async (event) => {
       })
     );
 
-    const header = 'runnerId,userId,persona,legType,pollDate,dayOfWeek,departureTimeUTC,originLat,originLng,destLat,destLng,distanceMeters,predictedDurationSeconds,staticDurationSeconds,weatherCondition,weatherTempC,weatherPrecipMm,weatherWindKph\n';
+    const header = 'runnerId,userId,persona,legType,pollDate,dayOfWeek,departureTimeLocal,originLat,originLng,destLat,destLng,distanceMeters,predictedDurationSeconds,staticDurationSeconds,weatherCondition,weatherTempC,weatherPrecipMm,weatherWindKph\n';
     const consolidated = header + parts.join('');
 
     // Write single consolidated CSV

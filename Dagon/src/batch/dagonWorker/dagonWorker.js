@@ -1,12 +1,12 @@
 // dagonWorker.js
 // SQS-triggered, one invocation per commuter runner (BatchSize: 1).
 // Reads the runner config from the SQS message body, calls the Google Routes API
-// with a traffic-aware prediction for today at the runner's stored UTC departure time,
+// with a traffic-aware prediction for today at the runner's stored local departure time,
 // enriches with Open-Meteo current weather for the origin coordinates, then writes a single
 // CSV row directly to S3 under raw/date=YYYY-MM-DD/{runnerId}.csv.
 //
 // CSV schema (no header row -- header is written by dagonConsolidator):
-//   runnerId, userId, persona, legType, pollDate, dayOfWeek, departureTimeUTC,
+//   runnerId, userId, persona, legType, pollDate, dayOfWeek, departureTimeLocal,
 //   originLat, originLng, destLat, destLng,
 //   distanceMeters, predictedDurationSeconds, staticDurationSeconds,
 //   weatherCondition, weatherTempC, weatherPrecipMm, weatherWindKph
@@ -106,7 +106,7 @@ exports.handler = async (event) => {
       runner.legType,
       pollDate,
       dayOfWeek,
-      runner.departureTimeUTC,
+      runner.departureTimeLocal,
       runner.originLat,
       runner.originLng,
       runner.destLat,
