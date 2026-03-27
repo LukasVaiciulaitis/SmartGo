@@ -164,6 +164,8 @@ Resources:
   # -------------------------------
   runnerConfigDB:
     Type: AWS::DynamoDB::Table
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
     Properties:
       TableName: runnerConfigDB
       BillingMode: PAY_PER_REQUEST
