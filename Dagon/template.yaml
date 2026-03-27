@@ -63,7 +63,7 @@ Resources:
                 Action: dynamodb:Query
                 Resource:
                   - !GetAtt runnerConfigDB.Arn
-                  - !Sub ${runnerConfigDB.Arn}/index/departureTimeUTC-index
+                  - !Sub ${runnerConfigDB.Arn}/index/departureTimeLocal-index
         - PolicyName: SQSAccess
           PolicyDocument:
             Version: '2012-10-17'
