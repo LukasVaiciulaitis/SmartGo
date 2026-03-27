@@ -240,7 +240,7 @@ Resources:
           DAGON_WORKER_QUEUE_URL: !Ref dagonWorkerQueue
 
   # SQS-triggered, one invocation per commuter runner.
-  # Calls Google Routes API (traffic-aware) + OpenWeather, writes one CSV row to S3.
+  # Calls Google Routes API (traffic-aware) + Open-Meteo, writes one CSV row to S3.
   dagonWorkerLambda:
     Type: AWS::Serverless::Function
     Properties:
@@ -273,9 +273,9 @@ Resources:
   # converts UTC fire time to Europe/Dublin local before querying -- firings outside
   # the active runner window are no-ops.
   #
-  # The orchestrator derives the exact 5-minute slot from event.time (the
-  # EventBridge scheduled time) -- not Date.now() -- to avoid Lambda cold-start
-  # jitter corrupting the slot calculation.
+  # The orchestrator falls back to Date.now() for slot calculation since the custom
+  # Input override on each rule replaces the default EventBridge event payload,
+  # meaning event.time is absent. Cold-start jitter is negligible at 5-minute granularity.
   # -------------------------------
   MorningWindowRule:
     Type: AWS::Events::Rule
