@@ -31,6 +31,5 @@ jobs:
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
             --parameter-overrides \
-              GoogleRoutesApiKey=${{ secrets.GOOGLE_ROUTES_API_KEY }} \
-              OpenWeatherApiKey=${{ secrets.OPEN_WEATHER_API_KEY }}
+              GoogleRoutesApiKey=${{ secrets.GOOGLE_ROUTES_API_KEY }}
         working-directory: Dagon

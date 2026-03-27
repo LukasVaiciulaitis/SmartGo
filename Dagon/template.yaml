@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
   Dagon commuter data pipeline -- EventBridge-triggered orchestrator fans out runners
-  via SQS across 5 commute windows. Each worker calls Google Routes API + OpenWeather
+  via SQS across 5 commute windows. Each worker calls Google Routes API + Open-Meteo
   and writes a CSV row directly to S3. A daily consolidator merges all raw fragments
   into one CSV per day after the evening window closes.
 
@@ -14,12 +14,6 @@ Parameters:
       Google Routes API key for traffic-aware route duration polling in dagonWorker.
       Pass via --parameter-overrides at deploy time or samconfig.toml parameter_overrides.
 
-  OpenWeatherApiKey:
-    Type: String
-    NoEcho: true
-    Description: >
-      OpenWeatherMap API key for origin-point weather enrichment in dagonWorker.
-      Pass via --parameter-overrides at deploy time or samconfig.toml parameter_overrides.
 
 Globals:
   Function:
@@ -78,7 +72,7 @@ Resources:
                 Action: sqs:SendMessage
                 Resource: !GetAtt dagonWorkerQueue.Arn
 
-  # dagonWorker: consumes SQS, calls Google Routes + OpenWeather, writes CSV row to S3.
+  # dagonWorker: consumes SQS, calls Google Routes + Open-Meteo, writes CSV row to S3.
   dagonWorkerRole:
     Type: AWS::IAM::Role
     Properties:
@@ -118,7 +112,6 @@ Resources:
                 Action: ssm:GetParameter
                 Resource:
                   - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dagon/googleRoutesApiKey
-                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dagon/openWeatherApiKey
 
   # dagonConsolidator: lists raw fragments, concatenates into one daily CSV, deletes raw.
   dagonConsolidatorRole:
@@ -161,14 +154,6 @@ Resources:
       Type: String
       Value: !Ref GoogleRoutesApiKey
       Description: Google Routes API key for traffic-aware route polling in dagonWorker
-
-  OpenWeatherApiKeyParam:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: /dagon/openWeatherApiKey
-      Type: String
-      Value: !Ref OpenWeatherApiKey
-      Description: OpenWeatherMap API key for origin-point weather enrichment in dagonWorker
 
   # -------------------------------
   # DYNAMODB -- runnerConfigDB

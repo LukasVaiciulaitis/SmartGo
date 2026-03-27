@@ -2,7 +2,7 @@
 // SQS-triggered, one invocation per commuter runner (BatchSize: 1).
 // Reads the runner config from the SQS message body, calls the Google Routes API
 // with a traffic-aware prediction for today at the runner's stored UTC departure time,
-// enriches with OpenWeather data for the origin coordinates, then writes a single
+// enriches with Open-Meteo current weather for the origin coordinates, then writes a single
 // CSV row directly to S3 under raw/date=YYYY-MM-DD/{runnerId}.csv.
 //
 // CSV schema (no header row -- header is written by dagonConsolidator):
@@ -12,7 +12,7 @@
 //   weatherCondition, weatherTempC, weatherPrecipMm, weatherWindKph
 
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-const { callWithRetry, fetchHttpJson, parseDurationSeconds, getRoutesApiKey, getWeatherKey } = require('/opt/nodejs/utils');
+const { callWithRetry, fetchHttpJson, parseDurationSeconds, getRoutesApiKey, WMO_CONDITION } = require('/opt/nodejs/utils');
 
 const s3 = new S3Client({});
 
@@ -74,10 +74,10 @@ exports.handler = async (event) => {
     const record = event.Records[0];
     const runner = JSON.parse(record.body);
 
-    // Fetch both API keys in parallel (SSM cache means this is effectively free after warm-up).
-    const [googleKey, weatherKey] = await Promise.all([getRoutesApiKey(), getWeatherKey()]);
+    // Fetch Google Routes API key from SSM (cached for container lifetime).
+    const googleKey = await getRoutesApiKey();
 
-    const weatherUrl = `https://api.openweathermap.org/data/2.5/weather?lat=${runner.originLat}&lon=${runner.originLng}&appid=${weatherKey}&units=metric`;
+    const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${runner.originLat}&longitude=${runner.originLng}&current=temperature_2m,precipitation,wind_speed_10m,weather_code`;
 
     // Fire both API calls in parallel and retry each independently.
     const [route, weather] = await Promise.all([
@@ -91,12 +91,13 @@ exports.handler = async (event) => {
 
     const predictedSeconds = parseDurationSeconds(route.duration);
     const staticSeconds = parseDurationSeconds(route.staticDuration);
-    const weatherCondition = weather.weather?.[0]?.main ?? '';
-    const tempC = weather.main?.temp ?? '';
-    // OpenWeather rain.1h is mm over the last hour; absent when no rain.
-    const precipMm = (weather.rain?.['1h'] ?? 0).toFixed(2);
-    // OpenWeather wind.speed is m/s; convert to km/h for readability.
-    const windKph = ((weather.wind?.speed ?? 0) * 3.6).toFixed(2);
+    const current = weather.current ?? {};
+    // Open-Meteo weather_code is a WMO code; map to a human-readable label.
+    const weatherCondition = WMO_CONDITION[current.weather_code] ?? '';
+    const tempC = current.temperature_2m ?? '';
+    // Open-Meteo precipitation is mm; wind_speed_10m is already km/h.
+    const precipMm = (current.precipitation ?? 0).toFixed(2);
+    const windKph = (current.wind_speed_10m ?? 0).toFixed(2);
 
     const csvRow = [
       runner.runnerId,

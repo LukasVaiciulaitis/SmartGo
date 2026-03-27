@@ -90,7 +90,6 @@ const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 
 const ssm = new SSMClient({});
 let cachedRoutesApiKey = null;
-let cachedWeatherKey = null;
 
 // Fetches the Google Routes API key from SSM on first call; cached for the lifetime of the container.
 const getRoutesApiKey = async () => {
@@ -104,16 +103,25 @@ const getRoutesApiKey = async () => {
   return cachedRoutesApiKey;
 };
 
-// Fetches the OpenWeather API key from SSM on first call; cached for the lifetime of the container.
-const getWeatherKey = async () => {
-  if (!cachedWeatherKey) {
-    const result = await ssm.send(new GetParameterCommand({
-      Name: '/dagon/openWeatherApiKey',
-      WithDecryption: false
-    }));
-    cachedWeatherKey = result.Parameter.Value;
-  }
-  return cachedWeatherKey;
+// ─── WMO Weather Codes ────────────────────────────────────────────────────────
+
+// Maps Open-Meteo WMO weather interpretation codes to human-readable condition labels.
+// Used by dagonWorker to populate the weatherCondition CSV column.
+// Reference: https://open-meteo.com/en/docs#weathervariables
+const WMO_CONDITION = {
+  0:  'Clear',
+  1:  'Mostly Clear', 2: 'Partly Cloudy', 3: 'Overcast',
+  45: 'Fog',          48: 'Icy Fog',
+  51: 'Light Drizzle', 53: 'Drizzle',     55: 'Heavy Drizzle',
+  56: 'Light Freezing Drizzle',           57: 'Freezing Drizzle',
+  61: 'Light Rain',   63: 'Rain',         65: 'Heavy Rain',
+  66: 'Light Freezing Rain',              67: 'Freezing Rain',
+  71: 'Light Snow',   73: 'Snow',         75: 'Heavy Snow',
+  77: 'Snow Grains',
+  80: 'Light Showers', 81: 'Showers',    82: 'Heavy Showers',
+  85: 'Light Snow Showers',              86: 'Snow Showers',
+  95: 'Thunderstorm',
+  96: 'Thunderstorm with Hail',          99: 'Thunderstorm with Heavy Hail',
 };
 
-module.exports = { chunkArray, parseDurationSeconds, callWithRetry, fetchHttpJson, getRoutesApiKey, getWeatherKey };
+module.exports = { chunkArray, parseDurationSeconds, callWithRetry, fetchHttpJson, getRoutesApiKey, WMO_CONDITION };
