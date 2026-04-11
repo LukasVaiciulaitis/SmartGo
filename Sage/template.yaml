@@ -1,0 +1,550 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Sage ML pipeline stack -- data load → train → evaluate → deploy for SmartGo
+  delay models. Parameterised by modelType (road | rail); one execution trains and
+  deploys one model. Triggered weekly by EventBridge. Produces serverless SageMaker
+  endpoints consumed by the Backend delayWorker.
+
+Parameters:
+  TrainingInstanceType:
+    Type: String
+    Default: ml.m5.xlarge
+    Description: >
+      SageMaker training instance type for the sklearn container job.
+      ml.m5.xlarge (4 vCPU, 16 GB) is sufficient for the combined.csv dataset size.
+      Scale up to ml.m5.2xlarge if training time exceeds 30 minutes.
+
+  SklearnImageUri:
+    Type: String
+    Default: 141502667606.dkr.ecr.eu-west-1.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3
+    Description: >
+      SageMaker-managed sklearn container image URI for eu-west-1.
+      Account 141502667606 is the AWS-managed DLC account for this region.
+      See: https://github.com/aws/deep-learning-containers/blob/master/available_images.md
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 300
+    MemorySize: 512
+    Layers:
+      - !Ref UtilsLayer
+      - !Ref LogicLayer
+    Environment:
+      Variables:
+        SAGE_BUCKET: !Ref SageDataBucket
+        TRAINING_IMAGE: !Ref SklearnImageUri
+        TRAINING_INSTANCE: !Ref TrainingInstanceType
+        SAGEMAKER_ROLE_ARN: !GetAtt SageMakerExecutionRole.Arn
+
+Resources:
+
+  # -------------------------------
+  # LAMBDA LAYERS
+  # -------------------------------
+  UtilsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: sage-utils
+      Description: Shared S3 and SSM helpers for Sage pipeline Lambdas
+      ContentUri: src/shared/
+      CompatibleRuntimes:
+        - nodejs20.x
+      RetentionPolicy: Delete
+
+  # SageMaker model scripts -- mounted at /opt/logic/ at runtime.
+  # Per-model tarballs (sageRoadModel.tar.gz, sageRailModel.tar.gz) are built by the
+  # deploy-sage workflow before sam build. sageDataLoader uploads the appropriate tarball
+  # to S3 on first run after a deploy. Each model script copies itself into /opt/ml/model/
+  # during training so the serving hooks are bundled into model.tar.gz automatically.
+  LogicLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: sage-logic
+      Description: SageMaker model scripts -- per-model tarballs for training; scripts self-bundle serving hooks into model.tar.gz
+      ContentUri: src/logic/
+      CompatibleRuntimes:
+        - nodejs20.x
+      RetentionPolicy: Delete
+
+  # -------------------------------
+  # IAM -- roles (least privilege)
+  # SageMakerExecutionRole: assumed by SageMaker training jobs and endpoint containers.
+  # SagePipelineRole: assumed by Step Functions to invoke Lambdas and SageMaker.
+  # SageLambdaRole: shared by all four pipeline Lambdas -- each has identical S3/SSM/SageMaker needs.
+  # -------------------------------
+
+  # SageMaker training jobs and the serverless endpoint container assume this role.
+  # AmazonSageMakerFullAccess is the AWS-recommended managed policy for execution roles;
+  # S3Access is scoped to SageDataBucket only.
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: smartgo-sagemaker-execution-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt SageDataBucket.Arn
+                  - !Sub ${SageDataBucket.Arn}/*
+
+  # Step Functions assumes this role to invoke the pipeline Lambdas and create SageMaker training jobs.
+  SagePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: smartgo-sage-pipeline-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt SageDataLoaderLambda.Arn
+                  - !GetAtt SageWorkerLambda.Arn
+        - PolicyName: SageMakerTraining
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker:CreateTrainingJob
+                  - sagemaker:DescribeTrainingJob
+                  - sagemaker:StopTrainingJob
+                  - sagemaker:AddTags
+                  - events:PutTargets
+                  - events:PutRule
+                  - events:DescribeRule
+                Resource: '*'
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt SageMakerExecutionRole.Arn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+
+  # Shared managed policy -- all pipeline Lambdas need identical S3/SageMaker/SSM access.
+  SageLambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: smartgo-sage-lambda-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:HeadObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt SageDataBucket.Arn
+              - !Sub ${SageDataBucket.Arn}/*
+          - Effect: Allow
+            Action:
+              - sagemaker:CreateModel
+              - sagemaker:CreateEndpointConfig
+              - sagemaker:CreateEndpoint
+              - sagemaker:UpdateEndpoint
+              - sagemaker:DescribeEndpoint
+              - sagemaker:DescribeTrainingJob
+              - sagemaker:ListModelPackages
+              - sagemaker:CreateModelPackage
+              - sagemaker:UpdateModelPackage
+              - sagemaker:CreateModelPackageGroup
+              - sagemaker:DescribeModelPackageGroup
+            Resource: '*'
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource: !GetAtt SageMakerExecutionRole.Arn
+          - Effect: Allow
+            Action:
+              - ssm:PutParameter
+              - ssm:GetParameter
+            Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/smartgo/sage/*
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub arn:aws:s3:::dagon-data-${AWS::AccountId}-${AWS::Region}
+              - !Sub arn:aws:s3:::dagon-data-${AWS::AccountId}-${AWS::Region}/*
+
+  # sageDataLoader, sageWorker all assume this role.
+  SageLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: smartgo-sage-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref SageLambdaPolicy
+
+  # -------------------------------
+  # SSM PARAMETERS
+  # Endpoint name and calibration written here for observability and cross-stack reads.
+  # API keys are not needed -- Sage calls only SageMaker and S3, both via IAM.
+  # -------------------------------
+
+  # Road model SSM params -- written by sageWorker, read by Backend and dashboards.
+  # Rail equivalents (/smartgo/sage/rail/*) are created when the rail model is added.
+  RoadEndpointNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /smartgo/sage/road/endpointName
+      Type: String
+      Value: smartgo-road-endpoint
+      Description: Active SageMaker endpoint name for the road delay model
+
+  # Written by sageWorker after each road pipeline run. Read by dashboards for monitoring.
+  # Segment-level calibration lives in model.tar.gz and is loaded by sageRoadModel.py directly.
+  RoadGlobalCalibrationParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /smartgo/sage/road/globalCalibration
+      Type: String
+      Value: '{"slope":1.0,"intercept":0.0}'
+      Description: Road model global linear calibration fallback {slope, intercept} -- updated each pipeline run
+
+  # Written by sageWorker after each road pipeline run. Summary metrics for dashboards and alerting.
+  RoadLastEvaluationParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /smartgo/sage/road/lastEvaluation
+      Type: String
+      Value: '{}'
+      Description: Road model last pipeline evaluation metrics (rmse, bias, mae, ciCoverage, gatePass)
+
+  # -------------------------------
+  # S3 -- sage data bucket
+  # imports/{modelType}/                       -- upload zone for manual import CSVs; never read directly after first run
+  # processed/{modelType}/imported/           -- import cache; new files copied here from imports/ once, read every run
+  # processed/{modelType}/daily/date=*/       -- per-day Dagon CSV cache; written once per date, never overwritten
+  # processed/{modelType}/runs/{run}/train/   -- assembled training CSV passed to SageMaker; regenerated each run
+  # code/{modelType}/{script}.tar.gz          -- model script tarball; uploaded once per deploy
+  # models/{job}/                             -- model.tar.gz written by SageMaker training job (do not lifecycle;
+  #                                              active endpoints reference these artifacts for cold starts)
+  # evaluations/{job}/                        -- evaluation.json written by model script via boto3
+  # history/{modelType}/evaluations.jsonl     -- append-only record of every run's metrics; never deleted
+  #
+  # Lifecycle strategy:
+  #   processed/          → 400 days  broad rule covering the daily cache tree
+  #   processed/*/runs/   → 30 days   narrower rule; S3 applies the shortest matching expiry,
+  #                                   so assembled training CSVs expire in 30 days while daily
+  #                                   cache files (processed/*/daily/) expire in 400 days
+  #   evaluations/        → 30 days   sageWorker writes metrics to SSM; S3 copy is debug-only
+  # -------------------------------
+  SageDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub smartgo-sage-data-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireDailyCache       # Daily Dagon CSVs; covers one full seasonal cycle + buffer
+            Status: Enabled
+            Prefix: processed/
+            ExpirationInDays: 400
+          - Id: ExpireRoadRuns         # Assembled road training CSVs; regenerated each run
+            Status: Enabled
+            Prefix: processed/road/runs/
+            ExpirationInDays: 30
+          - Id: ExpireRailRuns         # Assembled rail training CSVs; regenerated each run
+            Status: Enabled
+            Prefix: processed/rail/runs/
+            ExpirationInDays: 30
+          - Id: ExpireEvaluations      # Evaluation JSON; metrics are persisted to SSM by sageWorker
+            Status: Enabled
+            Prefix: evaluations/
+            ExpirationInDays: 30
+
+  # -------------------------------
+  # SAGEMAKER
+  # Model versions are registered here after each gate-passing pipeline run.
+  # The active endpoint always serves the latest approved package.
+  # -------------------------------
+
+  # Versioned registry for road delay model packages.
+  # Each approved package corresponds to one training run that passed the gate.
+  SmartGoModelPackageGroup:
+    Type: AWS::SageMaker::ModelPackageGroup
+    Properties:
+      ModelPackageGroupName: SmartGoRoadModel
+      ModelPackageGroupDescription: >
+        Versioned road traffic delay models (HistGradientBoosting quantile ensemble).
+        Each approved package is the candidate for the smartgo-road-endpoint.
+
+  # -------------------------------
+  # LAMBDA FUNCTIONS
+  # -------------------------------
+
+  # Reads modelType from Step Functions input, lists Dagon CSVs from the model-specific
+  # prefix, writes the combined dataset to the Sage bucket, and ensures the model script
+  # tarball is present in S3 (one-time upload per deploy per model type).
+  SageDataLoaderLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: smartgo-sage-data-loader
+      CodeUri: src/batch/sageDataLoader/
+      Handler: sageDataLoader.handler
+      Role: !GetAtt SageLambdaRole.Arn
+      MemorySize: 1024             # all Dagon daily CSVs loaded in memory for split
+      Environment:
+        Variables:
+          DAGON_BUCKET: !Sub dagon-data-${AWS::AccountId}-${AWS::Region}
+
+  # Reads evaluation.json, applies gate thresholds (RMSE ≤ 600s AND |bias| ≤ 200s), writes
+  # metrics to the model-specific SSM paths. If gate passes: creates or updates the
+  # model-specific SageMaker endpoint. If gate fails: throws GateNotPassedError so Step
+  # Functions routes to the GateFailed state.
+  SageWorkerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: smartgo-sage-worker
+      CodeUri: src/batch/sageWorker/
+      Handler: sageWorker.handler
+      Role: !GetAtt SageLambdaRole.Arn
+
+  # -------------------------------
+  # STEP FUNCTIONS -- sage pipeline
+  #
+  #   DataLoader → StartTraining (SageMaker sync) → Worker → PipelineComplete
+  #                                                     ↓ GateNotPassedError
+  #                                                  GateFailed
+  #
+  # DataLoader and Worker are Lambda steps.
+  # StartTraining uses the sagemaker:createTrainingJob.sync:2 integration --
+  # Step Functions polls SageMaker and resumes automatically on completion.
+  # Worker throws GateNotPassedError on gate failure; the Catch routes to
+  # GateFailed so PipelineFailureAlarm fires. Other errors bubble up as execution failures.
+  # -------------------------------
+  SagePipelineStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: smartgo-sage-pipeline
+      RoleArn: !GetAtt SagePipelineRole.Arn
+      DefinitionSubstitutions:
+        DataLoaderArn:          !GetAtt SageDataLoaderLambda.Arn
+        WorkerArn:              !GetAtt SageWorkerLambda.Arn
+        SageMakerRoleArn:       !GetAtt SageMakerExecutionRole.Arn
+        SklearnImage:           !Ref SklearnImageUri
+        TrainingInstance:       !Ref TrainingInstanceType
+      Definition:
+        Comment: SmartGo Sage pipeline -- preprocess → train → evaluate+deploy
+        StartAt: DataLoader
+        States:
+
+          DataLoader:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${DataLoaderArn}
+              Payload:
+                modelType.$:     $.modelType
+                executionName.$: $$.Execution.Name
+            ResultSelector:
+              bucketName.$:        $.Payload.bucketName
+              dataUri.$:           $.Payload.dataUri
+              codeUri.$:           $.Payload.codeUri
+              modelType.$:         $.Payload.modelType
+              sagemakerProgram.$:  $.Payload.sagemakerProgram
+              executionName.$:     $$.Execution.Name
+            ResultPath: $
+            Next: StartTraining
+
+          StartTraining:
+            Type: Task
+            Resource: arn:aws:states:::sagemaker:createTrainingJob.sync:2
+            Parameters:
+              TrainingJobName.$: States.Format('smartgo-{}-{}', $.modelType, $.executionName)
+              AlgorithmSpecification:
+                TrainingImage: ${SklearnImage}
+                TrainingInputMode: File
+              HyperParameters:
+                sagemaker_program.$: $.sagemakerProgram
+                sagemaker_submit_directory.$: $.codeUri
+                eval-bucket.$: $.bucketName
+                eval-key-prefix: evaluations
+              InputDataConfig:
+                - ChannelName: train
+                  DataSource:
+                    S3DataSource:
+                      S3DataType: S3Prefix
+                      S3Uri.$: $.dataUri
+                      S3DataDistributionType: FullyReplicated
+                  ContentType: text/csv
+              OutputDataConfig:
+                S3OutputPath.$: States.Format('s3://{}/models', $.bucketName)
+              ResourceConfig:
+                InstanceType: ${TrainingInstance}
+                InstanceCount: 1
+                VolumeSizeInGB: 20
+              RoleArn: ${SageMakerRoleArn}
+              StoppingCondition:
+                MaxRuntimeInSeconds: 3600
+            ResultSelector:
+              jobName.$:       $.TrainingJobName
+              modelArtifact.$: $.ModelArtifacts.S3ModelArtifacts
+              modelType.$:     $$.Execution.Input.modelType
+              executionName.$: $$.Execution.Name
+            ResultPath: $
+            Next: Worker
+
+          Worker:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${WorkerArn}
+              Payload.$: $
+            ResultPath: $.deployResult
+            Catch:
+              - ErrorEquals: [GateNotPassedError]
+                Next: GateFailed
+            Next: PipelineComplete
+
+          PipelineComplete:
+            Type: Succeed
+
+          GateFailed:
+            Type: Fail
+            Error: GateFailed
+            Cause: Calibrated RMSE or bias did not meet gate thresholds. Check evaluations/ in S3.
+
+  # -------------------------------
+  # EVENTBRIDGE -- pipeline schedule (weekly)
+  #
+  #   SagePipelineScheduleRule  cron(0 19 ? * SUN *)  fires 19:00 UTC every Sunday
+  #
+  # Weekly retraining on the rolling 52-week window keeps the model fresh without
+  # the overhead of nightly SageMaker jobs. The rule is DISABLED by default --
+  # enable after the first successful manual pipeline run.
+  # Future: add a drift-monitor Lambda that compares endpoint predictions to recent
+  # Dagon actuals nightly and triggers an early retrain when RMSE or bias exceeds
+  # threshold (see sageRoadModel.py for context on appropriate thresholds).
+  # -------------------------------
+
+  # IAM role allowing EventBridge to start the Step Functions state machine.
+  SagePipelineScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: smartgo-sage-schedule-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartSagePipeline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Ref SagePipelineStateMachine
+
+  SagePipelineScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: sagePipelineSchedule
+      Description: "19:00 UTC every Sunday -- weekly baseline retrain regardless of drift"
+      ScheduleExpression: cron(0 19 ? * SUN *)
+      State: ENABLED
+      Targets:
+        - Id: sagePipelineTarget
+          Arn: !Ref SagePipelineStateMachine
+          RoleArn: !GetAtt SagePipelineScheduleRole.Arn
+          Input: '{"modelType": "road"}'
+
+  # -------------------------------
+  # CLOUDWATCH -- pipeline failure alarm
+  # Fires on any GateFailed or training error within a 1-hour window.
+  # Check the Step Functions console and evaluations/ in SageDataBucket to diagnose.
+  # -------------------------------
+  PipelineFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: smartgo-sage-pipeline-failure
+      AlarmDescription: >
+        Fires when the Sage pipeline Step Functions execution fails (gate breach or training error).
+        Check the Step Functions console and evaluations/ prefix in SageDataBucket to diagnose.
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Ref SagePipelineStateMachine
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  SageDataBucketName:
+    Description: S3 bucket -- processed splits, model script tarballs, model artifacts, evaluations
+    Value: !Ref SageDataBucket
+    Export:
+      Name: SmartGoSageDataBucket
+
+  RoadEndpointName:
+    Description: Road model SageMaker serverless endpoint (active after first gate-passing pipeline run)
+    Value: smartgo-road-endpoint
+
+  SagePipelineArn:
+    Description: Step Functions state machine ARN for the Sage pipeline
+    Value: !Ref SagePipelineStateMachine
+    Export:
+      Name: SmartGoSagePipeline

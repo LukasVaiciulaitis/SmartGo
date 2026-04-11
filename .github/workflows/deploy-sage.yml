@@ -1,0 +1,37 @@
+name: Deploy Sage
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Sage/**'
+      - '.github/workflows/deploy-sage.yml'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - uses: aws-actions/setup-sam@v2
+
+      - name: Build logic layer artifacts
+        run: tar -czf Sage/src/logic/sageRoadModel.tar.gz -C Sage/src/logic sageRoadModel.py
+
+      - run: sam build
+        working-directory: Sage
+
+      - run: |
+          sam deploy \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset
+        working-directory: Sage
