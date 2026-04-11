@@ -84,7 +84,10 @@ async function loadRollingWindow(config) {
     .slice(0, 10); // 'YYYY-MM-DD'
 
   const allKeys = await s3ListKeys(DAGON_BUCKET, config.dagonPrefix);
-  if (!allKeys.length) throw new Error(`No consolidated CSVs found in s3://${DAGON_BUCKET}/${config.dagonPrefix}`);
+  if (!allKeys.length) {
+    console.log(`No consolidated CSVs found in s3://${DAGON_BUCKET}/${config.dagonPrefix} -- training will rely on imports only`);
+    return [];
+  }
 
   // Filter to keys within the rolling window using the date= partition in the key.
   const windowKeys = allKeys.filter(key => {
@@ -93,7 +96,8 @@ async function loadRollingWindow(config) {
   });
 
   if (!windowKeys.length) {
-    throw new Error(`No Dagon data found within the 52-week window (cutoff ${cutoff})`);
+    console.log(`No Dagon data found within the 52-week window (cutoff ${cutoff}) -- training will rely on imports only`);
+    return [];
   }
 
   // Delta detection: each daily CSV is cached in the Sage bucket once it has been
@@ -222,10 +226,7 @@ exports.handler = async (event) => {
 
     // 1. Load rolling 52-week window of Dagon data for this model type
     const rows = await loadRollingWindow(config);
-    if (rows.length === 0) {
-      throw new Error(`No data rows found in rolling 52-week window for modelType="${modelType}" -- all daily CSVs may be header-only`);
-    }
-    console.log(`Loaded ${rows.length} rows across rolling 52-week window`);
+    if (rows.length > 0) console.log(`Loaded ${rows.length} rows across rolling 52-week window`);
 
     // 1b. Append any manual import CSVs (run in parallel with nothing -- loadImports
     //     is independent of loadRollingWindow's output so we could parallelise, but
@@ -234,6 +235,10 @@ exports.handler = async (event) => {
     if (importRows.length > 0) {
       rows.push(...importRows);
       console.log(`Appended ${importRows.length} import row(s) -- total ${rows.length} rows`);
+    }
+
+    if (rows.length === 0) {
+      throw new Error(`No training data found for modelType="${modelType}" -- consolidated/ is empty and no imports present`);
     }
 
     // 2. Write full dataset to model-specific Sage bucket prefix.
