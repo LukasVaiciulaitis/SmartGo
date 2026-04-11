@@ -321,9 +321,7 @@ Resources:
     Type: AWS::SageMaker::ModelPackageGroup
     Properties:
       ModelPackageGroupName: SmartGoRoadModel
-      ModelPackageGroupDescription: >
-        Versioned road traffic delay models (HistGradientBoosting quantile ensemble).
-        Each approved package is the candidate for the smartgo-road-endpoint.
+      ModelPackageGroupDescription: "Versioned road traffic delay models (HistGradientBoosting quantile ensemble). Each approved package is the candidate for the smartgo-road-endpoint."
 
   # -------------------------------
   # LAMBDA FUNCTIONS
