@@ -15,6 +15,12 @@ Parameters:
       ml.m5.xlarge (4 vCPU, 16 GB) is sufficient for the combined.csv dataset size.
       Scale up to ml.m5.2xlarge if training time exceeds 30 minutes.
 
+  DagonBucketName:
+    Type: String
+    Description: >
+      Name of the Dagon S3 bucket containing consolidated training data.
+      Resolved dynamically from the commuter-data-stack outputs at deploy time.
+
   SklearnImageUri:
     Type: String
     Default: 141502667606.dkr.ecr.eu-west-1.amazonaws.com/sagemaker-scikit-learn:1.2-1-cpu-py3
@@ -199,8 +205,8 @@ Resources:
               - s3:GetObject
               - s3:ListBucket
             Resource:
-              - !Sub arn:aws:s3:::dagon-data-${AWS::AccountId}-${AWS::Region}
-              - !Sub arn:aws:s3:::dagon-data-${AWS::AccountId}-${AWS::Region}/*
+              - !Sub arn:aws:s3:::${DagonBucketName}
+              - !Sub arn:aws:s3:::${DagonBucketName}/*
 
   # sageDataLoader, sageWorker all assume this role.
   SageLambdaRole:
@@ -321,7 +327,7 @@ Resources:
       MemorySize: 1024             # all Dagon daily CSVs loaded in memory for split
       Environment:
         Variables:
-          DAGON_BUCKET: !Sub dagon-data-${AWS::AccountId}-${AWS::Region}
+          DAGON_BUCKET: !Ref DagonBucketName
 
   # Reads evaluation.json, applies gate thresholds (RMSE ≤ 600s AND |bias| ≤ 200s), writes
   # metrics to the model-specific SSM paths. If gate passes: creates or updates the

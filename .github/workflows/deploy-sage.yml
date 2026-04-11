@@ -30,9 +30,20 @@ jobs:
       - run: sam build
         working-directory: Sage
 
+      - name: Resolve Dagon bucket name
+        run: |
+          DAGON_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name commuter-data-stack \
+            --region eu-west-2 \
+            --query 'Stacks[0].Outputs[?OutputKey==`dagonDataBucketName`].OutputValue' \
+            --output text)
+          echo "DAGON_BUCKET=$DAGON_BUCKET" >> $GITHUB_ENV
+
       - run: |
           sam deploy \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
-            --on-failure DELETE
+            --on-failure DELETE \
+            --parameter-overrides \
+              DagonBucketName=${{ env.DAGON_BUCKET }}
         working-directory: Sage
