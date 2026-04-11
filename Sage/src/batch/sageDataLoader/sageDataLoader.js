@@ -33,7 +33,7 @@ const MODEL_CONFIG = {
     outputPrefix:     'processed/road',
     importPrefix:     'imports/road/',
     codeKey:          'code/road/sageRoadModel.tar.gz',
-    layerTarball:     '/opt/logic/sageRoadModel.tar.gz',
+    layerTarball:     '/opt/sageRoadModel.tar.gz',
     sagemakerProgram: 'sageRoadModel.py',
   },
   rail: {
@@ -41,7 +41,7 @@ const MODEL_CONFIG = {
     outputPrefix:     'processed/rail',
     importPrefix:     'imports/rail/',
     codeKey:          'code/rail/sageRailModel.tar.gz',
-    layerTarball:     '/opt/logic/sageRailModel.tar.gz',
+    layerTarball:     '/opt/sageRailModel.tar.gz',
     sagemakerProgram: 'sageRailModel.py',
   },
 };
