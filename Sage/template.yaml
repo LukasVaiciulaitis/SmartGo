@@ -185,11 +185,6 @@ Resources:
               - sagemaker:UpdateEndpoint
               - sagemaker:DescribeEndpoint
               - sagemaker:DescribeTrainingJob
-              - sagemaker:ListModelPackages
-              - sagemaker:CreateModelPackage
-              - sagemaker:UpdateModelPackage
-              - sagemaker:CreateModelPackageGroup
-              - sagemaker:DescribeModelPackageGroup
             Resource: '*'
           - Effect: Allow
             Action: iam:PassRole
@@ -308,20 +303,6 @@ Resources:
             Status: Enabled
             Prefix: evaluations/
             ExpirationInDays: 30
-
-  # -------------------------------
-  # SAGEMAKER
-  # Model versions are registered here after each gate-passing pipeline run.
-  # The active endpoint always serves the latest approved package.
-  # -------------------------------
-
-  # Versioned registry for road delay model packages.
-  # Each approved package corresponds to one training run that passed the gate.
-  SmartGoModelPackageGroup:
-    Type: AWS::SageMaker::ModelPackageGroup
-    Properties:
-      ModelPackageGroupName: SmartGoRoadModel
-      ModelPackageGroupDescription: "Versioned road traffic delay models (HistGradientBoosting quantile ensemble). Each approved package is the candidate for the smartgo-road-endpoint."
 
   # -------------------------------
   # LAMBDA FUNCTIONS
@@ -465,8 +446,7 @@ Resources:
   #   SagePipelineScheduleRule  cron(0 19 ? * SUN *)  fires 19:00 UTC every Sunday
   #
   # Weekly retraining on the rolling 52-week window keeps the model fresh without
-  # the overhead of nightly SageMaker jobs. The rule is DISABLED by default --
-  # enable after the first successful manual pipeline run.
+  # the overhead of nightly SageMaker jobs.
   # Future: add a drift-monitor Lambda that compares endpoint predictions to recent
   # Dagon actuals nightly and triggers an early retrain when RMSE or bias exceeds
   # threshold (see sageRoadModel.py for context on appropriate thresholds).
