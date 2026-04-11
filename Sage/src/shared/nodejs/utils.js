@@ -6,7 +6,7 @@
 const { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { SSMClient, PutParameterCommand } = require('@aws-sdk/client-ssm');
 
-const s3  = new S3Client({});
+const s3  = new S3Client({ followRegionRedirects: true });
 const ssm = new SSMClient({});
 
 // ─── S3 helpers ───────────────────────────────────────────────────────────────
