@@ -51,6 +51,7 @@ Globals:
         DELAYS_TABLE: !Ref DelaysDB
         LOCATION_DB_TABLE: !Ref LocationDB
         DELAY_WORKER_QUEUE_URL: !Ref DelayWorkerQueue
+        SAGEMAKER_ENDPOINT_NAME: smartgo-road-endpoint
 
 Resources:
 
@@ -360,6 +361,14 @@ Resources:
                   - sqs:DeleteMessage
                   - sqs:GetQueueAttributes
                 Resource: !GetAtt DelayWorkerQueue.Arn
+        - PolicyName: SageMakerInference
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker:InvokeEndpoint
+                Resource: !Sub arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/smartgo-road-endpoint
 
   # profileCreate: writes a single PROFILE record on user registration.
   ProfileCreateRole:

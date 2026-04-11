@@ -9,10 +9,12 @@
 //   A user who sets 08:45 always gets a forecast for 08:45 local time, winter or summer.
 //   All time comparisons within getRecommendation() operate in UTC.
 //
-// Recommendation engine is isolated in getRecommendation().
-// Phase 1: hardcoded rules (+10 rain, +30 events)
-// Phase 2: swap getRecommendation() for a Haiku API call
-// Phase 3: swap getRecommendation() for a SageMaker endpoint invocation
+// Recommendation engine:
+// Phase 1: hardcoded rules (+10 rain, +30 events) — getRecommendation() still generates reasoning text.
+// Phase 2: Haiku API call (skipped — XGBoost benchmark showed 8/10 wins over Haiku).
+// Phase 3 (current): SageMaker endpoint invocation for Sage-predicted trafficDeltaSeconds.
+//   getRecommendation() is retained for contextual reasoning text shown to the user.
+//   The departure time and buffer are driven by the Sage model; reasoning by the rules.
 //
 // adjustedDepartBy is stored as a full ISO 8601 UTC timestamp e.g. "2026-03-30T07:45:00Z".
 // Storing the date eliminates two problems for Android:
@@ -21,13 +23,17 @@
 //      arriveBy UTC - staticDuration - buffer goes negative (no clamping to 00:00)
 
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { SageMakerRuntimeClient, InvokeEndpointCommand } = require('@aws-sdk/client-sagemaker-runtime');
 // Phase 3: re-enable decodePolyline when switching corridor matching to polyline sampling (see ADR-004)
 const { batchGet, batchWrite, getDistanceKm /*, decodePolyline */ } = require('/opt/nodejs/utils');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
 
-const client = new DynamoDBClient({});
-const USER_ROUTE_TABLE = process.env.USER_ROUTE_TABLE;
-const DELAYS_TABLE = process.env.DELAYS_TABLE;
+const client    = new DynamoDBClient({});
+const smRuntime = new SageMakerRuntimeClient({});
+
+const USER_ROUTE_TABLE       = process.env.USER_ROUTE_TABLE;
+const DELAYS_TABLE           = process.env.DELAYS_TABLE;
+const SAGEMAKER_ENDPOINT_NAME = process.env.SAGEMAKER_ENDPOINT_NAME;
 
 // ─── Utility ─────────────────────────────────────────────────────────────────
 
@@ -93,7 +99,7 @@ const localTimeToUtcHHMM = (localHHMM, ianaTimezone, dateStr) => {
 // the Haversine overhead of dense polyline sampling. See ADR-004.
 //
 // Phase 3: replace with decoded polyline sampling for richer spatial coverage once
-// the ML model is trained and the userbase justifies the ~5x increase in compute cost.
+// the Sage model is trained and the userbase justifies the ~5x increase in compute cost.
 // Re-enable the commented block below and restore the decodePolyline import.
 const getRouteCorridorPoints = (route) => {
   // --- Phase 3: decoded polyline sampling (commented out — see ADR-004) ---
@@ -445,6 +451,76 @@ const getRecommendation = ({ hourly, corridorEvents, corridorRoadworks, transitA
   };
 };
 
+// ─── Sage Inference ───────────────────────────────────────────────────
+
+// Build the feature payload expected by inference.py from the data already
+// available in the delayWorker at prediction time.
+const buildSmFeatures = (route, ref, hourly, corridorEvents, corridorRoadworks, holiday, dayOfWeek, arriveByUtc, dateStr) => {
+  const staticDurationMins = route.staticDuration ?? 30;
+  const staticDurationSecs = staticDurationMins * 60;
+
+  // Approximate departure time from arriveBy and static duration.
+  const [arrH, arrM] = arriveByUtc.split(':').map(Number);
+  const arrMins = arrH * 60 + arrM;
+  const depMins = ((arrMins - staticDurationMins) % 1440 + 1440) % 1440;
+  const depH = Math.floor(depMins / 60);
+  const depM = depMins % 60;
+  const departureTimeLocal = `${String(depH).padStart(2, '0')}:${String(depM).padStart(2, '0')}`;
+
+  const legType = arrH >= 5 && arrH <= 11 ? 'morningCommute' : 'eveningReturn';
+
+  // Use the weather hour closest to departure time.
+  const depHourWeather = hourly.find(h => h.hour === depH) ?? hourly[0] ?? {};
+  const weatherCode     = depHourWeather.weatherCode ?? 0;
+  const weatherCondition = (weatherCode === 45 || weatherCode === 48) ? 'Fog'
+    : depHourWeather.snowfallCm > 0 ? 'Snow'
+    : depHourWeather.precipitationMm > 0 ? 'Rain'
+    : 'Clear';
+
+  const eventCount      = corridorEvents.length;
+  const maxEventCap     = eventCount > 0 ? Math.max(...corridorEvents.map(e => e.capacity ?? 0)) : 0;
+  // Events are already filtered to corridor -- treat nearest as 1 km approximation.
+  const nearestEventKm  = eventCount > 0 ? 1.0 : 99.0;
+
+  const roadworksCount    = corridorRoadworks.length;
+  // Approximate: each roadworks incident covers ~10% of the leg, capped at 100%.
+  const roadworksFraction = Math.min(roadworksCount * 0.10, 1.0);
+
+  return {
+    departureTimeLocal,
+    dayOfWeek,
+    legType,
+    // persona is not stored on the route record — default to cityCentreRadial.
+    // Phase 3c: store persona on the route at creation time and read it here.
+    persona:               route.persona ?? 'cityCentreRadial',
+    travelMode:            route.travelMode ?? 'DRIVE',
+    distanceMeters:        route.distanceMeters ?? 10000,
+    staticDurationSeconds: staticDurationSecs,
+    weatherTempC:          depHourWeather.temperatureC ?? 10.0,
+    weatherPrecipMm:       depHourWeather.precipitationMm ?? 0.0,
+    weatherWindKph:        depHourWeather.windspeedKph ?? 15.0,
+    weatherCondition,
+    eventCount,
+    maxEventCapacity:      maxEventCap,
+    nearestEventKm,
+    roadworksCount,
+    roadworksFraction,
+    isHoliday:             holiday ? 1 : 0,
+  };
+};
+
+// Invoke the SageMaker road delay endpoint.
+// Returns { trafficDeltaSeconds, lo, hi } or throws on error.
+const callDelayModel = async (features) => {
+  const res = await smRuntime.send(new InvokeEndpointCommand({
+    EndpointName: SAGEMAKER_ENDPOINT_NAME,
+    ContentType:  'application/json',
+    Accept:       'application/json',
+    Body:         JSON.stringify(features),
+  }));
+  return JSON.parse(Buffer.from(res.Body).toString('utf-8'));
+};
+
 // ─── DynamoDB Fetch Helpers ───────────────────────────────────────────────────
 
 // Fetch WEATHER#, EVENTS#, ROADWORKS#, TRANSIT#, and HOLIDAY# for all unique cityKey + date
@@ -602,7 +678,26 @@ exports.handler = async (event) => {
           const transitAlerts = filterCorridorTransitAlerts(commuteTransitRecord, route);
           const holiday = holidayCache[route.cityKey]?.[dateStr] ?? null;
 
-          const recommendation = getRecommendation({
+          // Phase 3: Sage-predicted delay from SageMaker. Falls back to rule-based
+          // extraBufferMins (0) on endpoint error so a cold pipeline never blocks forecasts.
+          let extraBufferMins = 0;
+          let mlLo = null;
+          let mlHi = null;
+          try {
+            const smFeatures = buildSmFeatures(
+              route, ref, hourly, corridorEvents, corridorRoadworks,
+              holiday, dayOfWeek, arriveByUtc, dateStr
+            );
+            const mlResult = await callDelayModel(smFeatures);
+            extraBufferMins = Math.max(0, Math.round(mlResult.trafficDeltaSeconds / 60));
+            mlLo = mlResult.lo;
+            mlHi = mlResult.hi;
+          } catch (smErr) {
+            console.warn(`SageMaker unavailable for ${ref.userId}/${ref.routeId} ${dayOfWeek} — using 0 buffer: ${smErr.message}`);
+          }
+
+          // Rule-based reasoning text for the UI (events, roadworks, weather, holiday).
+          const { reasoning } = getRecommendation({
             hourly,
             corridorEvents,
             corridorRoadworks,
@@ -613,6 +708,15 @@ exports.handler = async (event) => {
             staticDuration: route.staticDuration,
             forecastDate: dateStr
           });
+
+          // Departure calculation uses Sage-predicted extraBufferMins.
+          const [arriveHour, arriveMin] = arriveByUtc.split(':').map(Number);
+          const departMins = (arriveHour * 60 + arriveMin) - route.staticDuration - extraBufferMins;
+          const base = new Date(`${dateStr}T00:00:00Z`);
+          const adjustedDepartBy = new Date(base.getTime() + departMins * 60_000)
+            .toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+          const recommendation = { adjustedDepartBy, extraBufferMins, reasoning, mlLo, mlHi };
 
           // forecastDate lets Android anchor the ISO adjustedDepartBy to the correct calendar date
           // for timezone conversion — no client-side date computation required
