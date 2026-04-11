@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'Dagon/**'
+      - '.github/workflows/deploy-dagon.yml'
 
 permissions:
   id-token: write
@@ -30,6 +31,7 @@ jobs:
           sam deploy \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
+            --on-failure DELETE \
             --parameter-overrides \
               GoogleRoutesApiKey=${{ secrets.GOOGLE_ROUTES_API_KEY }}
         working-directory: Dagon
