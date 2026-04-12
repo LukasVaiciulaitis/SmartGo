@@ -15,8 +15,10 @@ import androidx.compose.material.pullrefresh.pullRefresh
 import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.smartgoprototype.domain.model.Route
@@ -165,9 +167,15 @@ private fun RouteItem(
     onToggleActive: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val alpha by animateFloatAsState(
+        targetValue = if (route.userActive) 1f else 0.4f,
+        label = "cardAlpha"
+    )
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .alpha(alpha),
         shape = MaterialTheme.shapes.medium
     ) {
         Column(
