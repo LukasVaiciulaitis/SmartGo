@@ -299,7 +299,7 @@ private fun RouteItem(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = formatDepartureTime(route.schedule.arriveByMinutes),
+                    text = formatArriveByTime(route.schedule.arriveByMinutes),
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.Medium
                 )
@@ -372,7 +372,7 @@ private fun DaysRow(
     }
 }
 
-private fun formatDepartureTime(totalMinutes: Int): String {
+private fun formatArriveByTime(totalMinutes: Int): String {
     val hour = (totalMinutes / 60).coerceIn(0, 23)
     val minute = (totalMinutes % 60).coerceIn(0, 59)
     return "%02d:%02d".format(hour, minute)

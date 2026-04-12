@@ -38,7 +38,7 @@ class EditRouteViewModel @Inject constructor(
                             originLabel = route.origin.label,
                             destinationLabel = route.destination.label,
                             travelMode = route.travelMode,
-                            arriveBy = LocalTime.ofSecondOfDay(route.schedule.arriveByMinutes * 60L),
+                            arriveBy = LocalTime.of(route.schedule.arriveByMinutes / 60, route.schedule.arriveByMinutes % 60),
                             activeDays = route.schedule.activeDays,
                             isLoading = false
                         )
