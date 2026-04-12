@@ -191,6 +191,7 @@ Resources:
               - sagemaker:UpdateEndpoint
               - sagemaker:DescribeEndpoint
               - sagemaker:DescribeTrainingJob
+              - sagemaker:AddTags
             Resource: '*'
           - Effect: Allow
             Action: iam:PassRole
