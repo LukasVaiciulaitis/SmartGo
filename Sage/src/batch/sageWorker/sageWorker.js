@@ -161,10 +161,17 @@ exports.handler = async (event) => {
     // 5. Create versioned SageMaker model
     // model.tar.gz contains the model script (copied by the script itself during training)
     // so SAGEMAKER_PROGRAM points directly to the combined training/serving script.
-    // CreateModel is idempotent-guarded: if a Lambda retry reaches this step after a previous
-    // attempt already created the model (but failed on a later step), treat it as success.
+    //
+    // Model and config names are fixed (smartgo-{modelType}, smartgo-{modelType}-cfg) rather
+    // than per-run UUIDs. This is intentional -- SmartGo has exactly two endpoints (road, rail)
+    // and never runs overlapping pipeline executions. The weekly EventBridge schedule ensures
+    // runs are sequential; concurrent executions are an architectural non-issue here.
+    // NOTE: The ResourceInUseException guard below handles Lambda retries within a single run,
+    // but would not protect against true concurrent runs. If concurrency ever becomes a
+    // requirement, switch back to UUID-suffixed names and use DeleteModel/DeleteEndpointConfig
+    // to clean up old versions after a successful UpdateEndpoint.
     console.log(`sageWorker gate passed -- deploying modelType="${modelType}" artifact="${modelArtifact}"`);
-    const modelName = `smartgo-${modelType}-${jobName}`;
+    const modelName = `smartgo-${modelType}`;
     try {
       await sm.send(new CreateModelCommand({
         ModelName:        modelName,
@@ -194,8 +201,7 @@ exports.handler = async (event) => {
     }
 
     // 6. Create endpoint config (serverless)
-    // Same idempotency guard: configName includes jobName so it is unique per training run.
-    const configName = `smartgo-${modelType}-cfg-${jobName}`;
+    const configName = `smartgo-${modelType}-cfg`;
     try {
       await sm.send(new CreateEndpointConfigCommand({
         EndpointConfigName: configName,
