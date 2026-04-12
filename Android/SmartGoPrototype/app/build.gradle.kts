@@ -4,7 +4,6 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.hilt.android)
     alias(libs.plugins.ksp)
-    alias(libs.plugins.kotlin.kapt)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.google.secrets)
 }
@@ -28,26 +27,6 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        // Read test base email from local.properties (gitignored).
-        // Add `test.base.email=yourname@gmail.com` to local.properties before running e2e tests.
-        // The tests append a timestamp suffix to generate a unique address per run.
-        val localPropsFile = rootProject.file("local.properties")
-        val testBaseEmail = if (localPropsFile.exists()) {
-            localPropsFile.readLines()
-                .firstOrNull { it.startsWith("test.base.email=") }
-                ?.substringAfter("=")
-                .orEmpty()
-        } else ""
-        testInstrumentationRunnerArguments["TEST_BASE_EMAIL"] = testBaseEmail
-
-        val testExistingUserTag = if (localPropsFile.exists()) {
-            localPropsFile.readLines()
-                .firstOrNull { it.startsWith("test.existing.user.tag=") }
-                ?.substringAfter("=")
-                .orEmpty()
-        } else ""
-        testInstrumentationRunnerArguments["TEST_EXISTING_USER_TAG"] = testExistingUserTag
     }
 
     buildTypes {
@@ -101,7 +80,7 @@ dependencies {
     implementation(libs.hilt.android)
     implementation(libs.hilt.navigation.compose)
     implementation(libs.google.places)
-    kapt(libs.hilt.compiler)
+    ksp(libs.hilt.compiler)
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
     ksp(libs.room.compiler)
