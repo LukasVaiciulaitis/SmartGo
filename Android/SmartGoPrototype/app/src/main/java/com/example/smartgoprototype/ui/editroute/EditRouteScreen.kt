@@ -121,10 +121,11 @@ fun EditRouteScreen(
                 ) {
                     OutlinedTextField(
                         value = uiState.title,
-                        onValueChange = onTitleChange,
+                        onValueChange = { if (it.length <= 48) onTitleChange(it) },
                         label = { Text("Route title") },
                         modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
+                        singleLine = true,
+                        supportingText = { Text("${uiState.title.length}/48") }
                     )
 
                     OutlinedTextField(

@@ -94,7 +94,10 @@ class LoginViewModel @Inject constructor(
     private fun LoginUiState.validate(): LoginUiState {
         val isIdentifierValid =
             email.isNotBlank() && android.util.Patterns.EMAIL_ADDRESS.matcher(email).matches()
-        val isPasswordValid = password.length >= 6
+        val isPasswordValid = password.length >= 8
+                && password.any { it.isUpperCase() }
+                && password.any { it.isLowerCase() }
+                && password.any { it.isDigit() }
 
         return copy(
             emailError = when {
@@ -102,7 +105,9 @@ class LoginViewModel @Inject constructor(
                 !isIdentifierValid -> "Invalid email"
                 else -> null
             },
-            passwordError = if (password.isNotBlank() && !isPasswordValid) "At least 6 characters" else null,
+            passwordError = if (password.isNotBlank() && !isPasswordValid)
+                "Min 8 chars with uppercase, lowercase, and a number"
+            else null,
             isLoginEnabled = isIdentifierValid && isPasswordValid && !isLoading
         )
     }

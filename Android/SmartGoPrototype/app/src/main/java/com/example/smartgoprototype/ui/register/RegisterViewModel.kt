@@ -102,18 +102,22 @@ class RegisterViewModel @Inject constructor(
 
     /**
      * Client-side validation for UX (inline errors + enabling/disabling the Register button).
-     *
-     * TODO: extend validation and comply with backend
+     * Cognito password policy: min 8 chars, uppercase, lowercase, digit required.
      */
     private fun RegisterUiState.validate(): RegisterUiState {
         val isEmailValid =
             email.isNotBlank() && android.util.Patterns.EMAIL_ADDRESS.matcher(email).matches()
         val isPasswordValid = password.length >= 8
+                && password.any { it.isUpperCase() }
+                && password.any { it.isLowerCase() }
+                && password.any { it.isDigit() }
         val isConfirmValid = confirmPassword == password && confirmPassword.isNotBlank()
 
         return copy(
             emailError = if (email.isNotBlank() && !isEmailValid) "Invalid email" else null,
-            passwordError = if (password.isNotBlank() && !isPasswordValid) "At least 8 characters" else null,
+            passwordError = if (password.isNotBlank() && !isPasswordValid)
+                "Min 8 chars with uppercase, lowercase, and a number"
+            else null,
             confirmPasswordError = when {
                 confirmPassword.isNotBlank() && confirmPassword != password -> "Passwords do not match"
                 else -> null
