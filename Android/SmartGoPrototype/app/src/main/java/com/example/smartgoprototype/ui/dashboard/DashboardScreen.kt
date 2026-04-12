@@ -1,6 +1,7 @@
 package com.example.smartgoprototype.ui.dashboard
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -23,7 +24,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.smartgoprototype.domain.model.Route
 import java.time.DayOfWeek
-import androidx.compose.foundation.clickable
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
@@ -67,14 +67,9 @@ fun DashboardScreen(
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
-                title = { Text("Dashboard") },
+                title = { Text("My Routes") },
                 actions = { TextButton(onClick = onLogoutClick) { Text("Logout") } }
             )
-        },
-        floatingActionButton = {
-            FloatingActionButton(onClick = onAddRouteClick) {
-                Icon(Icons.Default.Add, contentDescription = "Add route")
-            }
         }
     ) { innerPadding ->
         Box(
@@ -96,21 +91,25 @@ fun DashboardScreen(
                     }
                 }
                 uiState.routes.isEmpty() -> {
-                    Box(
+                    Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState()),
-                        contentAlignment = Alignment.Center
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = "No routes yet. Tap + to add one.",
+                            text = "No routes yet.",
                             style = MaterialTheme.typography.bodyLarge
                         )
+                        Spacer(Modifier.height(16.dp))
+                        AddRouteCard(onClick = onAddRouteClick)
                     }
                 }
                 else -> {
                     RoutesList(
                         routes = uiState.routes,
+                        onAddRouteClick = onAddRouteClick,
                         onEditRoute = onEditRoute,
                         onDeleteRoute = onDeleteRouteRequest,
                         onToggleDay = onToggleDay,
@@ -139,8 +138,43 @@ fun DashboardScreen(
 }
 
 @Composable
+private fun AddRouteCard(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = MaterialTheme.shapes.medium,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Add,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "Add a new route",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
+    }
+}
+
+@Composable
 private fun RoutesList(
     routes: List<Route>,
+    onAddRouteClick: () -> Unit,
     onEditRoute: (routeId: String) -> Unit,
     onDeleteRoute: (route: Route) -> Unit,
     onToggleDay: (routeId: String, day: DayOfWeek) -> Unit,
@@ -189,6 +223,9 @@ private fun RoutesList(
                     modifier = Modifier.longPressDraggableHandle()
                 )
             }
+        }
+        item(key = "add_route_button") {
+            AddRouteCard(onClick = onAddRouteClick)
         }
     }
 }
