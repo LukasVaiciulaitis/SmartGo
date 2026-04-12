@@ -185,7 +185,7 @@ private fun RoutesList(
     onToggleDay: (routeId: String, day: DayOfWeek) -> Unit,
     onToggleActive: (routeId: String) -> Unit,
     onReorder: (List<Route>) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     // Local display list — source of truth for ordering during and after drags.
     var localRoutes by remember { mutableStateOf(routes) }
@@ -231,6 +231,10 @@ private fun RoutesList(
         }
         item(key = "add_route_button") {
             AddRouteCard(onClick = onAddRouteClick)
+        }
+        item(key = "forecast_chart") {
+            Spacer(Modifier.height(6.dp))
+            ForecastSheet(routes = routes)
         }
     }
 }
@@ -310,6 +314,7 @@ private fun RouteItem(
                 Spacer(Modifier.width(10.dp))
                 DaysRow(
                     activeDays = route.schedule.activeDays,
+                    enabled = false,
                     onToggle = onToggleDay,
                     modifier = Modifier.weight(1f)
                 )
@@ -326,6 +331,7 @@ private fun RouteItem(
 @Composable
 private fun DaysRow(
     activeDays: Set<DayOfWeek>,
+    enabled: Boolean,
     onToggle: (DayOfWeek) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -346,7 +352,7 @@ private fun DaysRow(
         orderedDays.forEach { (day, label) ->
             val isActive = activeDays.contains(day)
             Surface(
-                modifier = Modifier.clickable { onToggle(day) },
+                modifier = Modifier.clickable(enabled = enabled) { onToggle(day) },
                 shape = MaterialTheme.shapes.small,
                 color = if (isActive) {
                     MaterialTheme.colorScheme.primary

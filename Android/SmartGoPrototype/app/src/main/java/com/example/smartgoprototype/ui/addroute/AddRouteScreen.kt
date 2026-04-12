@@ -1,12 +1,13 @@
 package com.example.smartgoprototype.ui.addroute
 
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -31,9 +32,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.example.smartgoprototype.domain.model.PlaceLocation
 import com.example.smartgoprototype.domain.model.TravelMode
@@ -172,25 +171,28 @@ private fun PlaceField(
     placeholder: String,
     onPick: () -> Unit
 ) {
-    var hasLaunchedFromFocus by remember { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+
+    // Launch only on explicit tap — not on focus changes caused by returning from the
+    // Places activity. onFocusChanged would re-fire when the screen regains focus after
+    // the activity result, immediately re-opening the picker before the user sees the form.
+    LaunchedEffect(interactionSource) {
+        interactionSource.interactions.collect { interaction ->
+            if (interaction is PressInteraction.Release) {
+                onPick()
+            }
+        }
+    }
 
     OutlinedTextField(
         value = value.orEmpty(),
-        onValueChange = { onPick() },
-        modifier = Modifier
-            .fillMaxWidth()
-            .onFocusChanged { focusState ->
-                if (focusState.isFocused && !hasLaunchedFromFocus) {
-                    hasLaunchedFromFocus = true
-                    onPick()
-                } else if (!focusState.isFocused) {
-                    hasLaunchedFromFocus = false
-                }
-            },
+        onValueChange = {},
+        modifier = Modifier.fillMaxWidth(),
+        readOnly = true,
+        interactionSource = interactionSource,
         label = { Text(label) },
         placeholder = { Text(placeholder) },
         singleLine = true,
-        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
         trailingIcon = {
             IconButton(onClick = onPick) {
                 Icon(
