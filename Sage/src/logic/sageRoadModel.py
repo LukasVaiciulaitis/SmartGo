@@ -13,7 +13,7 @@
 #
 # Serving:   SageMaker imports this module and calls model_fn / predict_fn per request.
 #            Input  (JSON): raw row fields -- departureTimeLocal, dayOfWeek, legType,
-#                           persona, travelMode, distanceMeters, staticDurationSeconds,
+#                           travelMode, distanceMeters, staticDurationSeconds,
 #                           weatherTempC, weatherPrecipMm, weatherWindKph, weatherCondition,
 #                           eventCount, maxEventCapacity, nearestEventKm, roadworksCount,
 #                           roadworksFraction, isHoliday
@@ -65,8 +65,6 @@ def engineer(row):
         'dayThu': 1 if day == 'THU' else 0,
         'dayFri': 1 if day == 'FRI' else 0,
         'daySat': 1 if day == 'SAT' else 0,
-        'personaCityCentre':    1 if row.get('persona') == 'cityCentreRadial' else 0,
-        'personaSmallBusiness': 1 if row.get('persona') == 'smallBusinessNeighbourhood' else 0,
         'distanceMeters':          distance,
         'staticDurationSeconds':   static,
         'avgFreeFlowSpeed':        round(speed, 3),
@@ -209,8 +207,8 @@ def predict_fn(data, model_bundle):
     static = int(data['staticDurationSeconds'])
     floor  = calibration.get('floor_fraction', FLOOR_FRACTION) * static - static
     mid    = max(mid, floor)
-    lo     = max(lo,  floor)
-    hi     = max(hi,  lo)
+    lo     = min(max(lo, floor), mid)   # lo <= mid always
+    hi     = max(hi, mid)               # hi >= mid always
 
     return {
         'trafficDeltaSeconds': int(round(mid)),

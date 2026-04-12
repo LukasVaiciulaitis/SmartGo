@@ -385,6 +385,26 @@ const decodePolyline = (encoded) => {
   return points;
 };
 
+// ─── WMO Weather Codes ────────────────────────────────────────────────────────
+
+// Maps Open-Meteo WMO weather interpretation codes to human-readable condition labels.
+// Matches the strings used in Dagon training data -- must stay in sync with Dagon/src/shared/nodejs/utils.js.
+const WMO_CONDITION = {
+  0:  'Clear',
+  1:  'Mostly Clear', 2: 'Partly Cloudy', 3: 'Overcast',
+  45: 'Fog',          48: 'Icy Fog',
+  51: 'Light Drizzle', 53: 'Drizzle',     55: 'Heavy Drizzle',
+  56: 'Light Freezing Drizzle',           57: 'Freezing Drizzle',
+  61: 'Light Rain',   63: 'Rain',         65: 'Heavy Rain',
+  66: 'Light Freezing Rain',              67: 'Freezing Rain',
+  71: 'Light Snow',   73: 'Snow',         75: 'Heavy Snow',
+  77: 'Snow Grains',
+  80: 'Light Showers', 81: 'Showers',    82: 'Heavy Showers',
+  85: 'Light Snow Showers',              86: 'Snow Showers',
+  95: 'Thunderstorm',
+  96: 'Thunderstorm with Hail',          99: 'Thunderstorm with Heavy Hail',
+};
+
 // ─── UUID / common regexes ────────────────────────────────────────────────────
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -588,4 +608,4 @@ const normaliseWaypoint = (w, resolvedLatLng) => ({
   placeId: w.placeId
 });
 
-module.exports = { chunkArray, parseDurationToMinutes, batchGet, batchWrite, callWithRetry, fetchHttpJson, response, getUserId, parseBody, MAX_ROUTES_PER_USER, VALID_DAYS, VALID_TRAVEL_MODES, DAY_MAP, isValidIANATimezone, computeArrivalUTC, ARRIVE_BY_REGEX, validateWaypoint, validateAddressComponents, extractCityFromComponents, buildCityObject, normaliseWaypoint, getDistanceKm, decodePolyline, UUID_REGEX, getRoutesApiKey, callRoutesApi, computeRoute, getTransitlandApiKey, discoverTransitlandFeedIds };
+module.exports = { chunkArray, parseDurationToMinutes, batchGet, batchWrite, callWithRetry, fetchHttpJson, response, getUserId, parseBody, MAX_ROUTES_PER_USER, VALID_DAYS, VALID_TRAVEL_MODES, DAY_MAP, isValidIANATimezone, computeArrivalUTC, ARRIVE_BY_REGEX, validateWaypoint, validateAddressComponents, extractCityFromComponents, buildCityObject, normaliseWaypoint, getDistanceKm, decodePolyline, UUID_REGEX, getRoutesApiKey, callRoutesApi, computeRoute, getTransitlandApiKey, discoverTransitlandFeedIds, WMO_CONDITION };

@@ -25,7 +25,7 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { SageMakerRuntimeClient, InvokeEndpointCommand } = require('@aws-sdk/client-sagemaker-runtime');
 // Phase 3: re-enable decodePolyline when switching corridor matching to polyline sampling (see ADR-004)
-const { batchGet, batchWrite, getDistanceKm /*, decodePolyline */ } = require('/opt/nodejs/utils');
+const { batchGet, batchWrite, getDistanceKm, WMO_CONDITION /*, decodePolyline */ } = require('/opt/nodejs/utils');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
 
 const client    = new DynamoDBClient({});
@@ -459,28 +459,29 @@ const buildSmFeatures = (route, ref, hourly, corridorEvents, corridorRoadworks, 
   const staticDurationMins = route.staticDuration ?? 30;
   const staticDurationSecs = staticDurationMins * 60;
 
-  // Approximate departure time from arriveBy and static duration.
-  const [arrH, arrM] = arriveByUtc.split(':').map(Number);
-  const arrMins = arrH * 60 + arrM;
-  const depMins = ((arrMins - staticDurationMins) % 1440 + 1440) % 1440;
+  // Departure time in local time -- ref.arriveBy is stored as local HH:MM, subtract static duration.
+  const [localArrH, localArrM] = ref.arriveBy.split(':').map(Number);
+  const localArrMins = localArrH * 60 + localArrM;
+  const depMins = ((localArrMins - staticDurationMins) % 1440 + 1440) % 1440;
   const depH = Math.floor(depMins / 60);
   const depM = depMins % 60;
   const departureTimeLocal = `${String(depH).padStart(2, '0')}:${String(depM).padStart(2, '0')}`;
 
-  const legType = arrH >= 5 && arrH <= 11 ? 'morningCommute' : 'eveningReturn';
+  const legType = localArrH >= 5 && localArrH <= 11 ? 'morningCommute' : 'eveningReturn';
 
   // Use the weather hour closest to departure time.
   const depHourWeather = hourly.find(h => h.hour === depH) ?? hourly[0] ?? {};
-  const weatherCode     = depHourWeather.weatherCode ?? 0;
-  const weatherCondition = (weatherCode === 45 || weatherCode === 48) ? 'Fog'
-    : depHourWeather.snowfallCm > 0 ? 'Snow'
-    : depHourWeather.precipitationMm > 0 ? 'Rain'
-    : 'Clear';
+  const weatherCode      = depHourWeather.weatherCode ?? 0;
+  const weatherCondition = WMO_CONDITION[weatherCode] ?? 'Clear';
 
   const eventCount      = corridorEvents.length;
   const maxEventCap     = eventCount > 0 ? Math.max(...corridorEvents.map(e => e.capacity ?? 0)) : 0;
-  // Events are already filtered to corridor -- treat nearest as 1 km approximation.
-  const nearestEventKm  = eventCount > 0 ? 1.0 : 99.0;
+  const corridorPoints  = getRouteCorridorPoints(route);
+  const nearestEventKm  = eventCount > 0
+    ? Math.min(...corridorEvents.map(ev =>
+        Math.min(...corridorPoints.map(cp => getDistanceKm(cp.lat, cp.lng, ev.lat, ev.lng)))
+      ))
+    : 99.0;
 
   const roadworksCount    = corridorRoadworks.length;
   // Approximate: each roadworks incident covers ~10% of the leg, capped at 100%.
@@ -490,9 +491,6 @@ const buildSmFeatures = (route, ref, hourly, corridorEvents, corridorRoadworks, 
     departureTimeLocal,
     dayOfWeek,
     legType,
-    // persona is not stored on the route record — default to cityCentreRadial.
-    // Phase 3c: store persona on the route at creation time and read it here.
-    persona:               route.persona ?? 'cityCentreRadial',
     travelMode:            route.travelMode ?? 'DRIVE',
     distanceMeters:        route.distanceMeters ?? 10000,
     staticDurationSeconds: staticDurationSecs,

@@ -193,7 +193,7 @@ exports.handler = async (event) => {
       }));
       console.log(`Created SageMaker model: ${modelName}`);
     } catch (err) {
-      if (err.name === 'ResourceInUseException' || err.message?.includes('already exists')) {
+      if (err.name === 'ResourceInUseException' || err.message?.includes('already exists') || err.message?.includes('already existing')) {
         console.log(`SageMaker model ${modelName} already exists -- Lambda retry, continuing`);
       } else {
         throw err;
@@ -220,7 +220,7 @@ exports.handler = async (event) => {
       }));
       console.log(`Created endpoint config: ${configName}`);
     } catch (err) {
-      if (err.name === 'ResourceInUseException' || err.message?.includes('already exists')) {
+      if (err.name === 'ResourceInUseException' || err.message?.includes('already exists') || err.message?.includes('already existing')) {
         console.log(`Endpoint config ${configName} already exists -- Lambda retry, continuing`);
       } else {
         throw err;
