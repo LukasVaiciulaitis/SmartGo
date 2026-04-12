@@ -469,8 +469,14 @@ const buildSmFeatures = (route, ref, hourly, corridorEvents, corridorRoadworks, 
 
   const legType = localArrH >= 5 && localArrH <= 11 ? 'morningCommute' : 'eveningReturn';
 
-  // Use the weather hour closest to departure time.
-  const depHourWeather = hourly.find(h => h.hour === depH) ?? hourly[0] ?? {};
+  // Weather lookup uses UTC departure hour -- Open-Meteo hourly records are UTC-keyed.
+  // depH is local time; in IST (UTC+1) local 08:00 = UTC 07:00, so we must derive the UTC
+  // departure hour from arriveByUtc (already UTC) rather than from the local depH.
+  const [utcArrH, utcArrM] = arriveByUtc.split(':').map(Number);
+  const utcArrMins = utcArrH * 60 + utcArrM;
+  const utcDepMins = ((utcArrMins - staticDurationMins) % 1440 + 1440) % 1440;
+  const utcDepH = Math.floor(utcDepMins / 60);
+  const depHourWeather = hourly.find(h => h.hour === utcDepH) ?? hourly[0] ?? {};
   const weatherCode      = depHourWeather.weatherCode ?? 0;
   const weatherCondition = WMO_CONDITION[weatherCode] ?? 'Clear';
 
