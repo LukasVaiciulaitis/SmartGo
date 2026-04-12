@@ -210,7 +210,7 @@ exports.handler = async (event) => {
           ModelName:    modelName,
           ServerlessConfig: {
             MemorySizeInMB: 2048,
-            MaxConcurrency: 50,
+            MaxConcurrency: 10,
           },
         }],
         Tags: [
