@@ -47,7 +47,17 @@ class RouteRepositoryImpl @Inject constructor(
 
     override suspend fun refreshRoutes() {
         val response = executeApiCall { api.getRoutes() }
-        val entities = response.routes.map { it.toEntity() }
+
+        // Preserve user-defined sort order: look up existing positions by ID,
+        // assign new positions only for routes that weren't in the cache before.
+        val existingSortOrders = dao.getAll().associate { it.id to it.sortOrder }
+        var nextOrder = (existingSortOrders.values.maxOrNull() ?: -1) + 1
+
+        val entities = response.routes.map { dto ->
+            dto.toEntity().copy(
+                sortOrder = existingSortOrders[dto.routeId] ?: nextOrder++
+            )
+        }
         dao.replaceAll(entities)
     }
 
@@ -75,7 +85,7 @@ class RouteRepositoryImpl @Inject constructor(
 
         val response = executeApiCall { api.createRoute(request) }
         val route = response.route.toDomainRoute(fallbackSchedule = schedule, fallbackTravelMode = travelMode)
-        dao.upsert(route.toEntity())
+        dao.upsert(route.toEntity().copy(sortOrder = dao.nextSortOrder()))
         return route
     }
 
@@ -119,6 +129,12 @@ class RouteRepositoryImpl @Inject constructor(
         } catch (e: Exception) {
             if (old != null) dao.upsert(old)
             throw e
+        }
+    }
+
+    override suspend fun reorderRoutes(orderedIds: List<String>) {
+        orderedIds.forEachIndexed { index, id ->
+            dao.updateSortOrder(id, index)
         }
     }
 

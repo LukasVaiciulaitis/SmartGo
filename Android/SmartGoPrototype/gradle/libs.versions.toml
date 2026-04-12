@@ -22,6 +22,7 @@ amplify = "2.30.4"
 desugar = "2.1.5"
 google-places = "5.1.1"
 secretsGradlePlugin = "2.0.1"
+reorderable = "2.4.3"
 
 [libraries]
 retrofit = { group = "com.squareup.retrofit2", name = "retrofit", version.ref = "retrofit" }
@@ -63,6 +64,7 @@ google-places = { module = "com.google.android.libraries.places:places", version
 room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
 room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+reorderable = { module = "sh.calvin.reorderable:reorderable", version.ref = "reorderable" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

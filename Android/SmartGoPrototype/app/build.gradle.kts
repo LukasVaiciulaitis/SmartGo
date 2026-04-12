@@ -86,6 +86,7 @@ dependencies {
     ksp(libs.room.compiler)
     implementation(libs.amplify.core)
     implementation(libs.amplify.auth.cognito)
+    implementation(libs.reorderable)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

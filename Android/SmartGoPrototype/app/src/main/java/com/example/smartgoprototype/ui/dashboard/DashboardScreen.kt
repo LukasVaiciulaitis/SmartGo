@@ -1,9 +1,10 @@
 package com.example.smartgoprototype.ui.dashboard
 
-import androidx.compose.foundation.clickable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.ExperimentalMaterialApi
@@ -15,7 +16,6 @@ import androidx.compose.material.pullrefresh.pullRefresh
 import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -23,6 +23,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.smartgoprototype.domain.model.Route
 import java.time.DayOfWeek
+import androidx.compose.foundation.clickable
+import sh.calvin.reorderable.ReorderableItem
+import sh.calvin.reorderable.rememberReorderableLazyListState
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterialApi::class)
 @Composable
@@ -36,7 +39,8 @@ fun DashboardScreen(
     onDeleteConfirm: () -> Unit,
     onDeleteDismiss: () -> Unit,
     onToggleDay: (routeId: String, day: DayOfWeek) -> Unit,
-    onToggleActive: (routeId: String) -> Unit
+    onToggleActive: (routeId: String) -> Unit,
+    onReorder: (List<Route>) -> Unit
 ) {
     val pullRefreshState = rememberPullRefreshState(
         refreshing = uiState.isRefreshing,
@@ -111,6 +115,7 @@ fun DashboardScreen(
                         onDeleteRoute = onDeleteRouteRequest,
                         onToggleDay = onToggleDay,
                         onToggleActive = onToggleActive,
+                        onReorder = onReorder,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -140,20 +145,50 @@ private fun RoutesList(
     onDeleteRoute: (route: Route) -> Unit,
     onToggleDay: (routeId: String, day: DayOfWeek) -> Unit,
     onToggleActive: (routeId: String) -> Unit,
+    onReorder: (List<Route>) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Local display list — source of truth for ordering during and after drags.
+    var localRoutes by remember { mutableStateOf(routes) }
+
+    // Sync incoming routes from the ViewModel:
+    // - Same set of IDs (toggle, edit): preserve local order, update data in place.
+    // - Different set of IDs (add/delete): re-sync fully from Room.
+    LaunchedEffect(routes) {
+        val incomingIds = routes.map { it.id }.toSet()
+        val localIds = localRoutes.map { it.id }.toSet()
+        localRoutes = if (incomingIds == localIds) {
+            val routeMap = routes.associateBy { it.id }
+            localRoutes.mapNotNull { routeMap[it.id] }
+        } else {
+            routes
+        }
+    }
+
+    val lazyListState = rememberLazyListState()
+    val reorderableState = rememberReorderableLazyListState(lazyListState) { from, to ->
+        localRoutes = localRoutes.toMutableList().apply {
+            add(to.index, removeAt(from.index))
+        }
+        onReorder(localRoutes)
+    }
+
     LazyColumn(
+        state = lazyListState,
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        items(routes) { route ->
-            RouteItem(
-                route = route,
-                onEditClick = { onEditRoute(route.id) },
-                onDeleteClick = { onDeleteRoute(route) },
-                onToggleDay = { day -> onToggleDay(route.id, day) },
-                onToggleActive = { onToggleActive(route.id) }
-            )
+        items(localRoutes, key = { it.id }) { route ->
+            ReorderableItem(reorderableState, key = route.id) { _ ->
+                RouteItem(
+                    route = route,
+                    onEditClick = { onEditRoute(route.id) },
+                    onDeleteClick = { onDeleteRoute(route) },
+                    onToggleDay = { day -> onToggleDay(route.id, day) },
+                    onToggleActive = { onToggleActive(route.id) },
+                    modifier = Modifier.longPressDraggableHandle()
+                )
+            }
         }
     }
 }
@@ -164,7 +199,8 @@ private fun RouteItem(
     onEditClick: () -> Unit,
     onDeleteClick: () -> Unit,
     onToggleDay: (DayOfWeek) -> Unit,
-    onToggleActive: () -> Unit
+    onToggleActive: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     val alpha by animateFloatAsState(
@@ -173,7 +209,7 @@ private fun RouteItem(
     )
 
     Card(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .alpha(alpha),
         shape = MaterialTheme.shapes.medium
@@ -181,8 +217,8 @@ private fun RouteItem(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .padding(horizontal = 14.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),

@@ -44,4 +44,7 @@ interface RouteRepository {
     )
 
     suspend fun deleteRoute(routeId: String)
+
+    /** Persists a new display order for the given routes. Local (Room) only. */
+    suspend fun reorderRoutes(orderedIds: List<String>)
 }

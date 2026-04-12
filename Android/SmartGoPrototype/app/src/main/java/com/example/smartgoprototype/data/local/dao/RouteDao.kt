@@ -26,9 +26,11 @@ abstract class RouteDao {
         upsertAll(routes)
     }
 
-    // Ordered by arrival time to match expected display order.
-    @Query("SELECT * FROM routes ORDER BY arriveByMinutes ASC")
+    @Query("SELECT * FROM routes ORDER BY sortOrder ASC")
     abstract fun observeRoutes(): Flow<List<RouteEntity>>
+
+    @Query("SELECT * FROM routes ORDER BY sortOrder ASC")
+    abstract suspend fun getAll(): List<RouteEntity>
 
     @Query("SELECT * FROM routes WHERE id = :id")
     abstract suspend fun getById(id: String): RouteEntity?
@@ -38,6 +40,12 @@ abstract class RouteDao {
 
     @Query("DELETE FROM routes WHERE id = :id")
     abstract suspend fun deleteById(id: String)
+
+    @Query("UPDATE routes SET sortOrder = :order WHERE id = :id")
+    abstract suspend fun updateSortOrder(id: String, order: Int)
+
+    @Query("SELECT COALESCE(MAX(sortOrder), -1) + 1 FROM routes")
+    abstract suspend fun nextSortOrder(): Int
 
     // Targeted mutations used for optimistic updates — cheaper than a full upsert.
     @Query("UPDATE routes SET userActive = :active WHERE id = :id")

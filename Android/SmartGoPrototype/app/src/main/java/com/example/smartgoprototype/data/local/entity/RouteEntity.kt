@@ -23,5 +23,6 @@ data class RouteEntity(
     val originLabel: String,
     val destinationPlaceId: String,
     val destinationLabel: String,
-    val cachedAt: Long
+    val cachedAt: Long,
+    val sortOrder: Int = 0
 )

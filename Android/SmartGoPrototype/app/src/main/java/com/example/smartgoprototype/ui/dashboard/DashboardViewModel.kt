@@ -83,6 +83,16 @@ class DashboardViewModel @Inject constructor(
         }
     }
 
+    fun reorderRoutes(reordered: List<Route>) {
+        viewModelScope.launch {
+            try {
+                routeRepository.reorderRoutes(reordered.map { it.id })
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(errorMessage = e.message ?: "Failed to reorder routes")
+            }
+        }
+    }
+
     fun toggleDay(routeId: String, day: DayOfWeek) {
         val route = _uiState.value.routes.find { it.id == routeId } ?: return
         val oldDays = route.schedule.activeDays
