@@ -7,7 +7,7 @@ import com.example.smartgoprototype.data.local.entity.RouteEntity
 
 @Database(
     entities = [RouteEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class SmartGoDatabase : RoomDatabase() {

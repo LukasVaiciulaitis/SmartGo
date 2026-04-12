@@ -10,15 +10,22 @@ import com.example.smartgoprototype.data.remote.dto.CreateRouteRequest
 import com.example.smartgoprototype.data.remote.dto.DeleteRouteRequestDto
 import com.example.smartgoprototype.data.remote.dto.EndpointPlace
 import com.example.smartgoprototype.data.remote.dto.FetchedRouteDto
+import com.example.smartgoprototype.data.remote.dto.ForecastDto
 import com.example.smartgoprototype.data.remote.dto.GoogleAddressComponentDto
 import com.example.smartgoprototype.data.remote.dto.IntermediatePlace
 import com.example.smartgoprototype.data.remote.dto.RouteCreatedDto
 import com.example.smartgoprototype.data.remote.dto.UpdateRouteRequestDto
+import com.example.smartgoprototype.domain.model.ForecastDay
+import com.example.smartgoprototype.domain.model.ForecastRecommendation
+import com.example.smartgoprototype.domain.model.ForecastStatus
 import com.example.smartgoprototype.domain.model.PlaceLocation
 import com.example.smartgoprototype.domain.model.Route
+import com.example.smartgoprototype.domain.model.RouteForecast
 import com.example.smartgoprototype.domain.model.RouteSchedule
 import com.example.smartgoprototype.domain.model.TravelMode
 import com.example.smartgoprototype.domain.repository.RouteRepository
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.Types
 import java.io.IOException
 import java.time.DayOfWeek
 import javax.inject.Inject
@@ -39,17 +46,30 @@ import retrofit2.HttpException
  */
 class RouteRepositoryImpl @Inject constructor(
     private val api: RoutesApi,
-    private val dao: RouteDao
+    private val dao: RouteDao,
+    private val moshi: Moshi
 ) : RouteRepository {
 
+    private val forecastAdapter by lazy {
+        moshi.adapter(RouteForecast::class.java)
+    }
+
+    private fun deserializeForecast(json: String?): RouteForecast? =
+        json?.let { runCatching { forecastAdapter.fromJson(it) }.getOrNull() }
+
+    private fun serializeForecast(forecast: RouteForecast?): String? =
+        forecast?.let { runCatching { forecastAdapter.toJson(it) }.getOrNull() }
+
     override fun observeRoutes(): Flow<List<Route>> =
-        dao.observeRoutes().map { entities -> entities.map { it.toDomain() } }
+        dao.observeRoutes().map { entities ->
+            entities.map { entity ->
+                entity.toDomain(parsedForecast = deserializeForecast(entity.forecastJson))
+            }
+        }
 
     override suspend fun refreshRoutes() {
         val response = executeApiCall { api.getRoutes() }
 
-        // Preserve user-defined sort order: look up existing positions by ID,
-        // assign new positions only for routes that weren't in the cache before.
         val existingSortOrders = dao.getAll().associate { it.id to it.sortOrder }
         var nextOrder = (existingSortOrders.values.maxOrNull() ?: -1) + 1
 
@@ -62,7 +82,9 @@ class RouteRepositoryImpl @Inject constructor(
     }
 
     override suspend fun getRouteById(routeId: String): Route? =
-        dao.getById(routeId)?.toDomain()
+        dao.getById(routeId)?.let { entity ->
+            entity.toDomain(parsedForecast = deserializeForecast(entity.forecastJson))
+        }
 
     override suspend fun addRoute(
         title: String,
@@ -98,7 +120,6 @@ class RouteRepositoryImpl @Inject constructor(
         timezone: String?,
         activeDays: Set<DayOfWeek>?
     ) {
-        // Snapshot the current entity so we can revert if the network call fails.
         val old = dao.getById(routeId)
 
         if (old != null) {
@@ -158,6 +179,7 @@ class RouteRepositoryImpl @Inject constructor(
             activeDays = emptySet(),
             timeZoneId = "UTC"
         )
+        val domainForecast = forecast?.toDomain()
         return Route(
             id = routeId,
             title = title,
@@ -165,8 +187,11 @@ class RouteRepositoryImpl @Inject constructor(
             destination = PlaceLocation(placeId = destination.placeId, label = destination.label),
             travelMode = travelMode.toDomainTravelMode() ?: TravelMode.DRIVE,
             userActive = userActive ?: true,
-            schedule = schedule
-        ).toEntity()
+            schedule = schedule,
+            staticDuration = staticDuration,
+            forecastStatus = forecastStatus.toDomainForecastStatus(),
+            forecast = domainForecast
+        ).toEntity().copy(forecastJson = serializeForecast(domainForecast))
     }
 
     private fun RouteCreatedDto.toDomainRoute(
@@ -181,12 +206,40 @@ class RouteRepositoryImpl @Inject constructor(
             destination = PlaceLocation(placeId = destination.placeId, label = destination.label),
             travelMode = travelMode.toDomainTravelMode() ?: fallbackTravelMode,
             userActive = true,
-            schedule = mappedSchedule
+            schedule = mappedSchedule,
+            forecastStatus = ForecastStatus.PENDING
         )
     }
 
+    private fun ForecastDto.toDomain(): RouteForecast = RouteForecast(
+        days = days.mapValues { (_, day) ->
+            ForecastDay(
+                forecastDate = day.forecastDate,
+                recommendation = ForecastRecommendation(
+                    adjustedDepartBy = day.recommendation.adjustedDepartBy,
+                    extraBufferMins = day.recommendation.extraBufferMins,
+                    reasoning = day.recommendation.reasoning,
+                    mlLo = day.recommendation.mlLo,
+                    mlHi = day.recommendation.mlHi
+                ),
+                hasWeatherData = day.hasWeatherData,
+                hasEventData = day.hasEventData,
+                hasRoadworksData = day.hasRoadworksData,
+                hasTransitData = day.hasTransitData,
+                hasHolidayData = day.hasHolidayData
+            )
+        },
+        generatedAt = generatedAt
+    )
+
     private fun String?.toDomainTravelMode(): TravelMode? =
         TravelMode.entries.find { it.name == this }
+
+    private fun String?.toDomainForecastStatus(): ForecastStatus = when (this) {
+        "active" -> ForecastStatus.ACTIVE
+        "pending" -> ForecastStatus.PENDING
+        else -> ForecastStatus.EMPTY
+    }
 
     private fun com.example.smartgoprototype.data.remote.dto.CreatedScheduleDto?.toDomainScheduleOrNull(): RouteSchedule? {
         val schedule = this ?: return null

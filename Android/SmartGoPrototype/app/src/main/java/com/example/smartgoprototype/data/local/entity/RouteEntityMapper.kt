@@ -1,7 +1,9 @@
 package com.example.smartgoprototype.data.local.entity
 
+import com.example.smartgoprototype.domain.model.ForecastStatus
 import com.example.smartgoprototype.domain.model.PlaceLocation
 import com.example.smartgoprototype.domain.model.Route
+import com.example.smartgoprototype.domain.model.RouteForecast
 import com.example.smartgoprototype.domain.model.RouteSchedule
 import com.example.smartgoprototype.domain.model.TravelMode
 import java.time.DayOfWeek
@@ -27,7 +29,18 @@ fun String.toDomainDays(): Set<DayOfWeek> =
 fun Set<DayOfWeek>.toActiveDaysJson(): String =
     DAY_ORDER.filter { contains(it) }.joinToString(",") { it.name.take(3) }
 
-fun RouteEntity.toDomain(): Route = Route(
+private fun String?.toDomainForecastStatus(): ForecastStatus = when (this) {
+    "active" -> ForecastStatus.ACTIVE
+    "pending" -> ForecastStatus.PENDING
+    else -> ForecastStatus.EMPTY
+}
+
+/**
+ * Converts a [RouteEntity] to a domain [Route].
+ * Forecast deserialization is handled in the repository
+ * and passed in as an already-parsed [RouteForecast].
+ */
+fun RouteEntity.toDomain(parsedForecast: RouteForecast? = null): Route = Route(
     id = id,
     title = title,
     origin = PlaceLocation(placeId = originPlaceId, label = originLabel),
@@ -38,7 +51,10 @@ fun RouteEntity.toDomain(): Route = Route(
         arriveByMinutes = arriveByMinutes,
         activeDays = activeDaysJson.toDomainDays(),
         timeZoneId = timeZoneId
-    )
+    ),
+    staticDuration = staticDuration,
+    forecastStatus = forecastStatus.toDomainForecastStatus(),
+    forecast = parsedForecast
 )
 
 fun Route.toEntity(): RouteEntity = RouteEntity(
@@ -53,5 +69,8 @@ fun Route.toEntity(): RouteEntity = RouteEntity(
     originLabel = origin.label,
     destinationPlaceId = destination.placeId,
     destinationLabel = destination.label,
-    cachedAt = System.currentTimeMillis()
+    cachedAt = System.currentTimeMillis(),
+    staticDuration = staticDuration,
+    forecastStatus = forecastStatus.name.lowercase(),
+    forecastJson = null // serialization handled in the repository layer where Moshi is available
 )

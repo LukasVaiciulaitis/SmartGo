@@ -11,5 +11,8 @@ data class Route(
     val destination: PlaceLocation,
     val travelMode: TravelMode,
     val userActive: Boolean,
-    val schedule: RouteSchedule
+    val schedule: RouteSchedule,
+    val staticDuration: Int? = null,
+    val forecastStatus: ForecastStatus = ForecastStatus.EMPTY,
+    val forecast: RouteForecast? = null
 )

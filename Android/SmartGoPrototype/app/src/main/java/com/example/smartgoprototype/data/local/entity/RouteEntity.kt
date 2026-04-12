@@ -24,5 +24,9 @@ data class RouteEntity(
     val destinationPlaceId: String,
     val destinationLabel: String,
     val cachedAt: Long,
-    val sortOrder: Int = 0
+    val sortOrder: Int = 0,
+    val staticDuration: Int? = null,
+    val forecastStatus: String? = null,
+    val forecastJson: String? = null,
+    val forecastGeneratedAt: String? = null
 )

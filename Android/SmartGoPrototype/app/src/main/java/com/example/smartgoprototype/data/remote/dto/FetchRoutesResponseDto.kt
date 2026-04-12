@@ -13,5 +13,8 @@ data class FetchedRouteDto(
     @field:Json(name = "destination") val destination: CreatedEndpointDto,
     @field:Json(name = "travelMode") val travelMode: String?,
     @field:Json(name = "userActive") val userActive: Boolean?,
-    @field:Json(name = "schedule") val schedule: CreatedScheduleDto?
+    @field:Json(name = "schedule") val schedule: CreatedScheduleDto?,
+    @field:Json(name = "staticDuration") val staticDuration: Int?,
+    @field:Json(name = "forecastStatus") val forecastStatus: String?,
+    @field:Json(name = "forecast") val forecast: ForecastDto?
 )

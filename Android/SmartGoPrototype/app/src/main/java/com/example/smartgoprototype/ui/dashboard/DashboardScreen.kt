@@ -22,8 +22,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.smartgoprototype.domain.model.ForecastStatus
 import com.example.smartgoprototype.domain.model.Route
+import com.example.smartgoprototype.domain.model.RouteForecast
 import java.time.DayOfWeek
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
@@ -298,10 +303,9 @@ private fun RouteItem(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = formatArriveByTime(route.schedule.arriveByMinutes),
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium
+                DepartureLabel(
+                    forecastStatus = route.forecastStatus,
+                    forecast = route.forecast
                 )
                 Spacer(Modifier.width(10.dp))
                 DaysRow(
@@ -372,8 +376,73 @@ private fun DaysRow(
     }
 }
 
-private fun formatArriveByTime(totalMinutes: Int): String {
-    val hour = (totalMinutes / 60).coerceIn(0, 23)
-    val minute = (totalMinutes % 60).coerceIn(0, 59)
-    return "%02d:%02d".format(hour, minute)
+@Composable
+private fun DepartureLabel(
+    forecastStatus: ForecastStatus,
+    forecast: RouteForecast?
+) {
+    when {
+        forecastStatus == ForecastStatus.PENDING -> {
+            Text(
+                text = "Pending",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        forecastStatus == ForecastStatus.EMPTY -> {
+            Text(
+                text = "—",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        forecast != null -> {
+            val nextDepart = nextDepartureLabel(forecast)
+            if (nextDepart != null) {
+                Column {
+                    Text(
+                        text = "Depart",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = nextDepart,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            } else {
+                Text(
+                    text = "—",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        else -> {
+            Text(
+                text = "—",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/**
+ * Finds the next future departure across all forecast days and returns it as a local HH:mm string.
+ */
+private fun nextDepartureLabel(forecast: RouteForecast): String? {
+    val zone = ZoneId.systemDefault()
+    val now = Instant.now()
+    val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+
+    return forecast.days.values
+        .mapNotNull { day ->
+            runCatching { Instant.parse(day.recommendation.adjustedDepartBy) }.getOrNull()
+        }
+        .filter { it.isAfter(now) }
+        .minOrNull()
+        ?.atZone(zone)
+        ?.format(timeFormatter)
 }
