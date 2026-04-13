@@ -51,7 +51,8 @@ Globals:
         DELAYS_TABLE: !Ref DelaysDB
         LOCATION_DB_TABLE: !Ref LocationDB
         DELAY_WORKER_QUEUE_URL: !Ref DelayWorkerQueue
-        SAGEMAKER_ENDPOINT_NAME: smartgo-road-endpoint
+        ROAD_ENDPOINT_NAME: smartgo-road-endpoint
+        RAIL_ENDPOINT_NAME: smartgo-rail-endpoint
 
 Resources:
 
@@ -368,8 +369,9 @@ Resources:
               - Effect: Allow
                 Action:
                   - sagemaker:InvokeEndpoint
-                Resource: !Sub arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/smartgo-road-endpoint
-
+                Resource:
+                  - !Sub arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/smartgo-road-endpoint
+                  - !Sub arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/smartgo-rail-endpoint
   # profileCreate: writes a single PROFILE record on user registration.
   ProfileCreateRole:
     Type: AWS::IAM::Role
@@ -393,8 +395,9 @@ Resources:
                 Action: dynamodb:PutItem
                 Resource: !GetAtt UserRouteDB.Arn
 
-  # transitInitializer: stream-triggered on locationDB INSERT, writes transitlandFeedId back to locationDB.
-  # Repurposed from GTFS static ingest — now discovers and stores the Transitland feed ID per city.
+  # transitInitializer: two stream triggers —
+  #   locationDB INSERT: discovers and stores Transitland feed IDs per city.
+  #   userRouteDB INSERT (travelMode=TRANSIT): populates TIMETABLE# records in delaysDB.
   TransitInitializerRole:
     Type: AWS::IAM::Role
     Properties:
@@ -423,6 +426,18 @@ Resources:
                   - dynamodb:DescribeStream
                   - dynamodb:ListStreams
                 Resource: !GetAtt LocationDB.StreamArn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                Resource: !GetAtt DelaysDB.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !GetAtt UserRouteDB.StreamArn
         - PolicyName: SSMAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -501,9 +516,8 @@ Resources:
       Value: !Ref TomTomApiKey
       Description: TomTom Traffic Incidents API key for roadworksScraper
 
-  # -------------------------------
   # SQS -- delay worker queue + DLQ
-  # Orchestrator enqueues chunks of 1,000 routes.
+  # Orchestrator enqueues chunks of 250 routes.
   # Worker Lambdas process one chunk per invocation.
   # Failed chunks retry up to 3 times then go to DLQ.
   # -------------------------------
@@ -554,6 +568,8 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE  # Triggers transitInitializer on TRANSIT ROUTE# INSERT
 
   # -------------------------------
   # DYNAMODB -- delaysDB
@@ -760,7 +776,9 @@ Resources:
             Queue: !GetAtt DelayWorkerQueue.Arn
             BatchSize: 1                  # One SQS message (chunk) per Lambda invocation
             ScalingConfig:
-              MaximumConcurrency: 20      # Max 20 worker Lambdas running simultaneously
+              MaximumConcurrency: 4       # Interim limit: 4 Lambdas × 2 SM endpoints = 8 concurrent
+                                          # invocations, safely under the default account quota of 10.
+                                          # Raise to 20+ after quota increase for L-96300102 is approved.
 
   # -------------------------------
   # REGISTRATION TRIGGERS
@@ -785,7 +803,7 @@ Resources:
 
   # -------------------------------
   # EVENT-DRIVEN LAMBDAS
-  # transitInitializer -- DynamoDB Stream on locationDB (INSERT)
+  # transitInitializer -- DynamoDB Stream on locationDB (INSERT) + userRouteDB (TRANSIT INSERT)
   # transitScraper     -- EventBridge nightly (part of ScrapersRule)
   # profileCreate      -- Cognito PostConfirmation trigger (see REGISTRATION TRIGGERS)
   # -------------------------------
@@ -796,7 +814,7 @@ Resources:
       CodeUri: src/event/transitInitializer/
       Handler: transitInitializer.handler
       Role: !GetAtt TransitInitializerRole.Arn
-      MemorySize: 512   # ZIP parsing; Dublin GTFS static can be 10MB+ in memory
+      MemorySize: 512
       Events:
         LocationDBStream:
           Type: DynamoDB
@@ -806,6 +824,15 @@ Resources:
             FilterCriteria:
               Filters:
                 - Pattern: '{"eventName": ["INSERT"]}'
+            BisectBatchOnFunctionError: true
+        UserRouteDBStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt UserRouteDB.StreamArn
+            StartingPosition: LATEST
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["INSERT"], "dynamodb": {"NewImage": {"travelMode": {"S": ["TRANSIT"]}}}}'
             BisectBatchOnFunctionError: true
 
   TransitScraperLambda:

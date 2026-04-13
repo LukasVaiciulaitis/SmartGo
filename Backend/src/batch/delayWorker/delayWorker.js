@@ -1,5 +1,5 @@
 // delayWorker — triggered by SQS, MaximumConcurrency controlled via event source mapping
-// Receives a chunk of up to 1,000 {userId, routeId, arriveBy, timezone, daysOfWeek} from delayOrchestrator.
+// Receives a chunk of up to 250 {userId, routeId, arriveBy, timezone, daysOfWeek} from delayOrchestrator.
 //
 // Timezone handling:
 //   arriveBy is stored as the user's LOCAL time intent e.g. "08:45" — not UTC
@@ -7,14 +7,24 @@
 //   For each forecast date, arriveBy is converted to UTC using the IANA timezone rules
 //   for that specific date — this means DST is handled automatically.
 //   A user who sets 08:45 always gets a forecast for 08:45 local time, winter or summer.
-//   All time comparisons within getRecommendation() operate in UTC.
+//   All time comparisons operate in UTC.
 //
 // Recommendation engine:
-// Phase 1: hardcoded rules (+10 rain, +30 events) — getRecommendation() still generates reasoning text.
-// Phase 2: Haiku API call (skipped — XGBoost benchmark showed 8/10 wins over Haiku).
-// Phase 3 (current): SageMaker endpoint invocation for Sage-predicted trafficDeltaSeconds.
-//   getRecommendation() is retained for contextual reasoning text shown to the user.
-//   The departure time and buffer are driven by the Sage model; reasoning by the rules.
+// Phase 3 (current): SageMaker endpoint invocations for Sage-predicted trafficDeltaSeconds.
+//   Two models: road (DRIVE/BUS/TRAM/WALK/etc.) and rail (RAIL/SUBWAY/COMMUTER_TRAIN/etc.).
+//
+//   TRANSIT routes: all road-type legs across all forecast days are batched into one road
+//   model invocation; all rail-type legs across all forecast days into one rail invocation.
+//   At most two SageMaker calls per route regardless of leg or day count.
+//
+//   Non-TRANSIT routes: all forecast days are batched into one road model invocation.
+//   One SageMaker call per route.
+//
+//   TRANSIT routes: timetable cascade runs inline after SM predictions. TIMETABLE# records
+//   are fetched in the same BatchGetItem as weather/events/roadworks data. For each step,
+//   simulateCascadeBackwards snaps to the latest real scheduled departure and propagates
+//   connection constraints backwards. Gracefully falls back to arithmetic per step when no
+//   timetable data exists. FORECAST# is written once with the already-snapped departure.
 //
 // adjustedDepartBy is stored as a full ISO 8601 UTC timestamp e.g. "2026-03-30T07:45:00Z".
 // Storing the date eliminates two problems for Android:
@@ -25,15 +35,16 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { SageMakerRuntimeClient, InvokeEndpointCommand } = require('@aws-sdk/client-sagemaker-runtime');
 // Phase 3: re-enable decodePolyline when switching corridor matching to polyline sampling (see ADR-004)
-const { batchGet, batchWrite, getDistanceKm, WMO_CONDITION /*, decodePolyline */ } = require('/opt/nodejs/utils');
+const { batchGet, batchWrite, getDistanceKm, WMO_CONDITION, RAIL_VEHICLE_TYPES, parseDurationToMinutes /*, decodePolyline */ } = require('/opt/nodejs/utils');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
 
 const client    = new DynamoDBClient({});
 const smRuntime = new SageMakerRuntimeClient({});
 
-const USER_ROUTE_TABLE       = process.env.USER_ROUTE_TABLE;
-const DELAYS_TABLE           = process.env.DELAYS_TABLE;
-const SAGEMAKER_ENDPOINT_NAME = process.env.SAGEMAKER_ENDPOINT_NAME;
+const USER_ROUTE_TABLE   = process.env.USER_ROUTE_TABLE;
+const DELAYS_TABLE       = process.env.DELAYS_TABLE;
+const ROAD_ENDPOINT_NAME = process.env.ROAD_ENDPOINT_NAME;
+const RAIL_ENDPOINT_NAME = process.env.RAIL_ENDPOINT_NAME;
 
 // ─── Utility ─────────────────────────────────────────────────────────────────
 
@@ -296,27 +307,6 @@ const filterCommuteWindowTransitAlerts = (transitRecord, arriveByUtc, staticDura
   };
 };
 
-// ─── Recommendation Engine ───────────────────────────────────────────────────
-// Phase 1: hardcoded deterministic rules.
-// This function is the only thing that changes when moving to Haiku or SageMaker.
-// Input contract: { hourly, corridorEvents, corridorRoadworks, transitAlerts, arriveBy, staticDuration, forecastDate }
-//   arriveBy     — UTC HH:MM string for the forecast date
-//   forecastDate — ISO date string "YYYY-MM-DD", anchors adjustedDepartBy as a full UTC timestamp
-// Output contract: { adjustedDepartBy, extraBufferMins, reasoning }
-//   adjustedDepartBy — ISO 8601 UTC timestamp e.g. "2026-03-30T07:45:00Z"
-//   Departure may fall on the day before forecastDate when the commute crosses midnight UTC
-
-// Return the hourly records that fall within the user's commute window [departHour, arriveHour].
-// All weather rules operate on this slice — computed once, shared across all Rule 1 checks.
-const getCommuteWindowHours = (hourly, arriveBy, staticDuration) => {
-  if (!hourly || hourly.length === 0) return [];
-  const [arriveHour, arriveMin] = arriveBy.split(':').map(Number);
-  const departHour = Math.floor(((arriveHour * 60 + arriveMin) - staticDuration) / 60);
-  return hourly.filter(h => {
-    const hour = parseInt(h.hour, 10);
-    return hour >= departHour && hour <= arriveHour;
-  });
-};
 
 // Filter events whose pre-crowd phase overlaps with the user's commute window.
 // Both sides use local time: Ticketmaster's localTime vs. user's local arriveBy.
@@ -330,11 +320,6 @@ const getCommuteWindowHours = (hourly, arriveBy, staticDuration) => {
 //   eventStart - preCrowdMins < arriveTotal   → crowd is still building when commuter arrives
 //   eventStart >= departTotal                 → event hasn't already started before commuter sets off
 //                                               (post-start, streets are clearing not filling)
-// Examples:
-//   09:00 event (12k), 08:45 arrive, 30 min trip → preCrowdMins≈40, crowd from 08:20
-//     08:20 < 08:45 ✓  AND  09:00 >= 08:15 ✓ → INCLUDED
-//   00:00 concert, 08:45 arrive, 30 min trip → preCrowdMins≈30
-//     -30 < 08:45 ✓  but  00:00 >= 08:15 ✗  → EXCLUDED (event long over before commute)
 const filterCommuteEvents = (events, arriveBy, staticDuration) => {
   if (!events || events.length === 0) return [];
   const [arriveHour, arriveMin] = arriveBy.split(':').map(Number);
@@ -349,160 +334,168 @@ const filterCommuteEvents = (events, arriveBy, staticDuration) => {
   });
 };
 
-const getRecommendation = ({ hourly, corridorEvents, corridorRoadworks, transitAlerts, holiday, travelMode, arriveBy, staticDuration, forecastDate }) => {
-  const reasons = [];
-  let extraBufferMins = 0;
 
-  // staticDuration is required — throw rather than silently produce a wrong departure time
-  if (staticDuration === undefined || staticDuration === null) {
-    throw new Error(`staticDuration missing on route record — cannot calculate departure time`);
-  }
-
-  const windowHours = getCommuteWindowHours(hourly, arriveBy, staticDuration);
-
-  // Rule 1a: any precipitation during commute window → +10 minutes
-  // precipitationMm includes rain, showers, and snowfall (total wet output) — catches all wet conditions
-  const totalPrecipMm = windowHours.reduce((sum, h) => sum + (h.precipitationMm || 0), 0);
-  if (totalPrecipMm > 0.5) {
-    extraBufferMins += 10;
-    reasons.push('Rain expected during your commute window — allow extra time');
-  }
-
-  // Rule 1b: snowfall during commute window → +10 minutes
-  // Snowfall is a subset of precipitation but warrants a separate buffer — icy roads and
-  // reduced visibility cause delays beyond what wet roads alone produce.
-  // Falls back gracefully if snowfallCm is absent (records written before this field was added).
-  const totalSnowfallCm = windowHours.reduce((sum, h) => sum + (h.snowfallCm || 0), 0);
-  if (totalSnowfallCm > 0.1) {
-    extraBufferMins += 10;
-    reasons.push('Snow forecast during your commute — allow extra time for icy conditions');
-  }
-
-  // Rule 1c: high wind during commute window → +10 minutes
-  // Threshold: 50 km/h (Beaufort 7 — near gale). Affects cyclists and pedestrians significantly;
-  // also slows traffic on exposed roads and bridges.
-  const maxWindKph = windowHours.reduce((max, h) => Math.max(max, h.windspeedKph || 0), 0);
-  if (maxWindKph >= 50) {
-    extraBufferMins += 10;
-    reasons.push(`Strong winds forecast (${Math.round(maxWindKph)} km/h) — allow extra time`);
-  }
-
-  // Rule 1d: fog during commute window → +10 minutes
-  // WMO weather codes 45 (fog) and 48 (depositing rime fog) indicate near-zero visibility.
-  // Falls back gracefully if weatherCode is absent on older records.
-  const FOG_CODES = new Set([45, 48]);
-  const hasFog = windowHours.some(h => FOG_CODES.has(h.weatherCode));
-  if (hasFog) {
-    extraBufferMins += 10;
-    reasons.push('Fog forecast during your commute — allow extra time for reduced visibility');
-  }
-
-  // Rule 2: each corridor event with overlapping pre-crowd window → capacity-scaled buffer
-  // Small venues (1,500) add ~11 min; large arenas (12k) ~18 min; stadiums (30k) ~31 min.
-  for (const ev of (corridorEvents || [])) {
-    const delayMins = getEventDelayMins(ev.capacity);
-    extraBufferMins += delayMins;
-    reasons.push(`Crowd congestion expected near your route: ${ev.name} — allow an extra ${delayMins} min`);
-  }
-
-  // Rule 3: each roadworks incident on the corridor → +10 minutes
-  for (const inc of (corridorRoadworks || [])) {
-    extraBufferMins += 10;
-    reasons.push(`Roadworks on your route${inc.description ? `: ${inc.description}` : ''}`);
-  }
-
-  // Rule 4: transit disruptions affecting stops or lines on the route → +10 minutes each
-  for (const alert of (transitAlerts?.pointAlerts || [])) {
-    extraBufferMins += 10;
-    reasons.push(`Transit disruption at ${alert.stopName || 'a stop on your route'}: ${alert.header || 'service alert'}`);
-  }
-  for (const alert of (transitAlerts?.routeAlerts || [])) {
-    extraBufferMins += 10;
-    reasons.push(`Service disruption on ${alert.shortName || alert.longName || 'a line on your route'}: ${alert.header || 'service alert'}`);
-  }
-
-  // Rule 5: public holiday
-  // TRANSIT routes add +10 min — reduced frequency and crowding on public holidays.
-  // DRIVE and other modes are informational only — roads are quieter but closures may apply.
-  if (holiday) {
-    if (travelMode === 'TRANSIT') {
-      extraBufferMins += 10;
-      reasons.push(`Public holiday (${holiday.name}) — reduced transit service expected, allow extra time`);
-    } else {
-      reasons.push(`Public holiday (${holiday.name}) — check for road closures or altered services before you travel`);
+// ─── Reasoning builder ───────────────────────────────────────────────────────
+// Converts the reason codes returned by the Sage models into user-facing text.
+// Codes that reference named entities (EVENT, ROADWORKS, SERVICE_ALERT, HOLIDAY) are
+// enriched with names/descriptions from the corridor data already in scope.
+const buildReasoningFromCodes = (reasonCodes, corridorEvents, corridorRoadworks, transitAlerts, holiday, travelMode) => {
+  const parts = [];
+  for (const code of reasonCodes) {
+    switch (code) {
+      case 'RAIN':
+        parts.push('Rain expected during your commute — allow extra time');
+        break;
+      case 'SNOW':
+        parts.push('Snow forecast on your route — allow extra time for icy conditions');
+        break;
+      case 'FOG':
+        parts.push('Fog forecast during your commute — allow extra time for reduced visibility');
+        break;
+      case 'HIGH_WIND':
+        parts.push('High winds forecast on your route — allow extra time');
+        break;
+      case 'CORRIDOR_TRAFFIC':
+        parts.push('This route tends to be busier at this time — allow extra time');
+        break;
+      case 'SCHEDULE_PATTERN':
+        parts.push('This service tends to run late at this time — allow extra time');
+        break;
+      case 'EVENT':
+        for (const ev of (corridorEvents || [])) {
+          const delayMins = getEventDelayMins(ev.capacity);
+          parts.push(`Crowd congestion expected near your route: ${ev.name} — allow an extra ${delayMins} min`);
+        }
+        break;
+      case 'ROADWORKS':
+        for (const inc of (corridorRoadworks || [])) {
+          parts.push(`Roadworks on your route${inc.description ? `: ${inc.description}` : ''}`);
+        }
+        break;
+      case 'SERVICE_ALERT':
+        for (const alert of (transitAlerts?.pointAlerts || [])) {
+          parts.push(`Transit disruption at ${alert.stopName || 'a stop on your route'}: ${alert.header || 'service alert'}`);
+        }
+        for (const alert of (transitAlerts?.routeAlerts || [])) {
+          parts.push(`Service disruption on ${alert.shortName || alert.longName || 'a line on your route'}: ${alert.header || 'service alert'}`);
+        }
+        break;
+      case 'HOLIDAY':
+        if (holiday) {
+          if (travelMode === 'TRANSIT') {
+            parts.push(`Public holiday (${holiday.name}) — reduced transit service expected, allow extra time`);
+          } else {
+            parts.push(`Public holiday (${holiday.name}) — check for road closures or altered services before you travel`);
+          }
+        }
+        break;
     }
   }
-
-  const [arriveHour, arriveMin] = arriveBy.split(':').map(Number);
-  const departMins = (arriveHour * 60 + arriveMin) - staticDuration - extraBufferMins;
-
-  // Anchor departure to the forecast date in UTC. departMins may be negative when the commute
-  // crosses midnight — e.g. arriveBy "00:30" UTC with staticDuration 45 gives departMins -15,
-  // which correctly resolves to "23:45:00Z" on the previous calendar day. No clamping needed.
-  const base = new Date(`${forecastDate}T00:00:00Z`);
-  const adjustedDepartBy = new Date(base.getTime() + departMins * 60_000)
-    .toISOString()
-    .replace(/\.\d{3}Z$/, 'Z');
-
-  return {
-    adjustedDepartBy,
-    extraBufferMins,
-    reasoning: reasons.length > 0 ? reasons.join('. ') : 'Normal conditions — no disruptions expected.'
-  };
+  return parts;
 };
 
-// ─── Sage Inference ───────────────────────────────────────────────────
+// ─── Sage Inference ───────────────────────────────────────────────────────────
+// Both callers accept an array of feature objects and return an array of predictions.
+// The model endpoints handle both single-object and array input (see sageRoadModel.py /
+// sageRailModel.py predict_fn); we always send arrays for batched throughput.
+// Empty array input short-circuits without an API call.
 
-// Build the feature payload expected by inference.py from the data already
-// available in the delayWorker at prediction time.
-const buildSmFeatures = (route, ref, hourly, corridorEvents, corridorRoadworks, holiday, dayOfWeek, arriveByUtc, dateStr) => {
-  const staticDurationMins = route.staticDuration ?? 30;
-  const staticDurationSecs = staticDurationMins * 60;
+const callRoadModelBatch = async (featuresArray) => {
+  if (featuresArray.length === 0) return [];
+  const res = await smRuntime.send(new InvokeEndpointCommand({
+    EndpointName: ROAD_ENDPOINT_NAME,
+    ContentType:  'application/json',
+    Accept:       'application/json',
+    Body:         JSON.stringify(featuresArray),
+  }));
+  const result = JSON.parse(Buffer.from(res.Body).toString('utf-8'));
+  return Array.isArray(result) ? result : [result];
+};
 
-  // Departure time in local time -- ref.arriveBy is stored as local HH:MM, subtract static duration.
+const callRailModelBatch = async (featuresArray) => {
+  if (featuresArray.length === 0) return [];
+  const res = await smRuntime.send(new InvokeEndpointCommand({
+    EndpointName: RAIL_ENDPOINT_NAME,
+    ContentType:  'application/json',
+    Accept:       'application/json',
+    Body:         JSON.stringify(featuresArray),
+  }));
+  const result = JSON.parse(Buffer.from(res.Body).toString('utf-8'));
+  return Array.isArray(result) ? result : [result];
+};
+
+// ─── Road model features ──────────────────────────────────────────────────────
+// Builds the feature payload for the road SageMaker model.
+//
+// Covers surface vehicles subject to traffic, roadworks, and events:
+// BUS, TRAM, WALK, DRIVE, TWO_WHEELER, BICYCLE, FERRY, CABLE_CAR, etc.
+//
+// step:  null for whole-route non-TRANSIT journeys (DRIVE/WALK/TWO_WHEELER/BICYCLE);
+//        or an individual step for road legs within a TRANSIT route (WALK/BUS/TRAM steps).
+//        When step is provided, step.staticDuration and vehicle.type override route-level values.
+//        Returns null when step is provided but lacks staticDuration (pre-Phase 2 record — skip).
+// route: full route record for corridor context (distanceMeters, staticDuration, steps)
+// ref:   schedule record — ref.arriveBy is local HH:MM used for departure time and legType
+const buildRoadFeatures = (step, route, ref, hourly, corridorEvents, corridorRoadworks, holiday, dayOfWeek, arriveByUtc) => {
+  // Duration — step-level when available, route-level for whole-route calls
+  let staticDurationSecs;
+  if (step !== null) {
+    const parsed = parseInt(String(step.staticDuration ?? '').replace(/s$/, ''), 10);
+    if (!step.staticDuration || isNaN(parsed) || parsed === 0) return null;
+    staticDurationSecs = parsed;
+  } else {
+    staticDurationSecs = (route.staticDuration ?? 30) * 60;
+  }
+  const staticDurationMins = staticDurationSecs / 60;
+
+  // Travel mode — step vehicle type for per-step calls, route travelMode for whole-route calls
+  const travelMode = step !== null
+    ? (step.travelMode === 'TRANSIT'
+        ? (step.transitDetails?.transitLine?.vehicle?.type ?? 'BUS')
+        : step.travelMode)
+    : (route.travelMode ?? 'DRIVE');
+
+  // Departure time — local HH:MM so the model sees the same time-of-day patterns it was trained on
   const [localArrH, localArrM] = ref.arriveBy.split(':').map(Number);
   const localArrMins = localArrH * 60 + localArrM;
-  const depMins = ((localArrMins - staticDurationMins) % 1440 + 1440) % 1440;
-  const depH = Math.floor(depMins / 60);
-  const depM = depMins % 60;
-  const departureTimeLocal = `${String(depH).padStart(2, '0')}:${String(depM).padStart(2, '0')}`;
+  const localDepMins = ((localArrMins - staticDurationMins) % 1440 + 1440) % 1440;
+  const localDepH = Math.floor(localDepMins / 60);
+  const localDepM = localDepMins % 60;
+  const departureTimeLocal = `${String(localDepH).padStart(2, '0')}:${String(localDepM).padStart(2, '0')}`;
 
   const legType = localArrH >= 5 && localArrH <= 11 ? 'morningCommute' : 'eveningReturn';
 
-  // Weather lookup uses UTC departure hour -- Open-Meteo hourly records are UTC-keyed.
-  // depH is local time; in IST (UTC+1) local 08:00 = UTC 07:00, so we must derive the UTC
-  // departure hour from arriveByUtc (already UTC) rather than from the local depH.
+  // Weather — UTC departure hour (Open-Meteo hourly records are UTC-keyed)
   const [utcArrH, utcArrM] = arriveByUtc.split(':').map(Number);
   const utcArrMins = utcArrH * 60 + utcArrM;
   const utcDepMins = ((utcArrMins - staticDurationMins) % 1440 + 1440) % 1440;
-  const utcDepH = Math.floor(utcDepMins / 60);
+  const utcDepH    = Math.floor(utcDepMins / 60);
   const depHourWeather = hourly.find(h => h.hour === utcDepH) ?? hourly[0] ?? {};
-  const weatherCode      = depHourWeather.weatherCode ?? 0;
+  const weatherCode    = depHourWeather.weatherCode ?? 0;
   const weatherCondition = WMO_CONDITION[weatherCode] ?? 'Clear';
 
-  const eventCount      = corridorEvents.length;
-  const maxEventCap     = eventCount > 0 ? Math.max(...corridorEvents.map(e => e.capacity ?? 0)) : 0;
-  const corridorPoints  = getRouteCorridorPoints(route);
-  const nearestEventKm  = eventCount > 0
+  // Events and roadworks — corridor-level signals for road delay prediction
+  const eventCount     = corridorEvents.length;
+  const maxEventCap    = eventCount > 0 ? Math.max(...corridorEvents.map(e => e.capacity ?? 0)) : 0;
+  const corridorPoints = getRouteCorridorPoints(route);
+  const nearestEventKm = eventCount > 0
     ? Math.min(...corridorEvents.map(ev =>
         Math.min(...corridorPoints.map(cp => getDistanceKm(cp.lat, cp.lng, ev.lat, ev.lng)))
       ))
     : 99.0;
-
   const roadworksCount    = corridorRoadworks.length;
-  // Approximate: each roadworks incident covers ~10% of the leg, capped at 100%.
-  const roadworksFraction = Math.min(roadworksCount * 0.10, 1.0);
+  const roadworksFraction = Math.min(roadworksCount * 0.10, 1.0); // ~10% of leg per incident, capped at 100%
 
   return {
     departureTimeLocal,
     dayOfWeek,
     legType,
-    travelMode:            route.travelMode ?? 'DRIVE',
+    travelMode,
     distanceMeters:        route.distanceMeters ?? 10000,
     staticDurationSeconds: staticDurationSecs,
-    weatherTempC:          depHourWeather.temperatureC ?? 10.0,
+    weatherTempC:          depHourWeather.temperatureC  ?? 10.0,
     weatherPrecipMm:       depHourWeather.precipitationMm ?? 0.0,
-    weatherWindKph:        depHourWeather.windspeedKph ?? 15.0,
+    weatherWindKph:        depHourWeather.windspeedKph  ?? 15.0,
     weatherCondition,
     eventCount,
     maxEventCapacity:      maxEventCap,
@@ -513,29 +506,170 @@ const buildSmFeatures = (route, ref, hourly, corridorEvents, corridorRoadworks, 
   };
 };
 
-// Invoke the SageMaker road delay endpoint.
-// Returns { trafficDeltaSeconds, lo, hi } or throws on error.
-const callDelayModel = async (features) => {
-  const res = await smRuntime.send(new InvokeEndpointCommand({
-    EndpointName: SAGEMAKER_ENDPOINT_NAME,
-    ContentType:  'application/json',
-    Accept:       'application/json',
-    Body:         JSON.stringify(features),
-  }));
-  return JSON.parse(Buffer.from(res.Body).toString('utf-8'));
+// ─── Rail model features ──────────────────────────────────────────────────────
+// Builds the feature payload for the rail SageMaker model.
+//
+// Covers dedicated right-of-way vehicles with timetable-driven delay patterns:
+// RAIL, SUBWAY, COMMUTER_TRAIN, HIGH_SPEED_TRAIN, LONG_DISTANCE_TRAIN, MONORAIL, etc.
+//
+// Roadworks are excluded — road construction does not affect rail infrastructure.
+// Events are included — stadium/concert crowds increase train occupancy and cause delays.
+// isHoliday is included — holiday patterns affect both service frequency and passenger demand.
+// hasServiceAlert and lineShortName are the primary signals for rail schedule adherence.
+//
+// Returns null when step lacks staticDuration (pre-Phase 2 record — skip).
+const buildRailFeatures = (step, route, ref, hourly, corridorEvents, transitAlerts, holiday, dayOfWeek, arriveByUtc) => {
+  const parsed = parseInt(String(step.staticDuration ?? '').replace(/s$/, ''), 10);
+  if (!step.staticDuration || isNaN(parsed) || parsed === 0) return null;
+  const staticDurationSecs = parsed;
+  const staticDurationMins = staticDurationSecs / 60;
+
+  const travelMode = step.transitDetails?.transitLine?.vehicle?.type ?? 'RAIL';
+
+  // Departure time — local HH:MM so the model sees the same time-of-day patterns it was trained on
+  const [localArrH, localArrM] = ref.arriveBy.split(':').map(Number);
+  const localArrMins = localArrH * 60 + localArrM;
+  const localDepMins = ((localArrMins - staticDurationMins) % 1440 + 1440) % 1440;
+  const localDepH = Math.floor(localDepMins / 60);
+  const localDepM = localDepMins % 60;
+  const departureTimeLocal = `${String(localDepH).padStart(2, '0')}:${String(localDepM).padStart(2, '0')}`;
+
+  const legType = localArrH >= 5 && localArrH <= 11 ? 'morningCommute' : 'eveningReturn';
+
+  // Weather — UTC departure hour (Open-Meteo hourly records are UTC-keyed)
+  const [utcArrH, utcArrM] = arriveByUtc.split(':').map(Number);
+  const utcArrMins = utcArrH * 60 + utcArrM;
+  const utcDepMins = ((utcArrMins - staticDurationMins) % 1440 + 1440) % 1440;
+  const utcDepH    = Math.floor(utcDepMins / 60);
+  const depHourWeather = hourly.find(h => h.hour === utcDepH) ?? hourly[0] ?? {};
+  const weatherCode    = depHourWeather.weatherCode ?? 0;
+  const weatherCondition = WMO_CONDITION[weatherCode] ?? 'Clear';
+
+  // Events — stadium/concert crowds increase train occupancy and cause platform/service delays
+  const eventCount     = corridorEvents.length;
+  const maxEventCap    = eventCount > 0 ? Math.max(...corridorEvents.map(e => e.capacity ?? 0)) : 0;
+  const corridorPoints = getRouteCorridorPoints(route);
+  const nearestEventKm = eventCount > 0
+    ? Math.min(...corridorEvents.map(ev =>
+        Math.min(...corridorPoints.map(cp => getDistanceKm(cp.lat, cp.lng, ev.lat, ev.lng)))
+      ))
+    : 99.0;
+
+  // Service alert — primary signal for rail punctuality and schedule adherence
+  const lineShortName = step.transitDetails?.transitLine?.nameShort ?? null;
+  const hasServiceAlert = lineShortName
+    ? ((transitAlerts?.routeAlerts || []).some(a => a.shortName === lineShortName) ? 1 : 0)
+    : 0;
+
+  return {
+    departureTimeLocal,
+    dayOfWeek,
+    legType,
+    travelMode,
+    distanceMeters:        route.distanceMeters ?? 10000,
+    staticDurationSeconds: staticDurationSecs,
+    weatherTempC:          depHourWeather.temperatureC  ?? 10.0,
+    weatherPrecipMm:       depHourWeather.precipitationMm ?? 0.0,
+    weatherWindKph:        depHourWeather.windspeedKph  ?? 15.0,
+    weatherCondition,
+    eventCount,
+    maxEventCapacity:      maxEventCap,
+    nearestEventKm,
+    isHoliday:             holiday ? 1 : 0,
+    lineShortName:         lineShortName ?? '',
+    hasServiceAlert,
+  };
+};
+
+// ─── Timetable helpers ────────────────────────────────────────────────────────
+
+// Returns the total minutes of the latest scheduled departure at or before targetMins,
+// or null if no such departure exists in the sorted 'HH:MM' departures array.
+const snapToScheduledDeparture = (departures, targetMins) => {
+  let best = null;
+  for (const dep of departures) {
+    const [h, m] = dep.split(':').map(Number);
+    const depTotal = h * 60 + m;
+    if (depTotal <= targetMins && (best === null || depTotal > best)) best = depTotal;
+  }
+  return best;
+};
+
+// Walk backwards through route steps, subtracting each step's effective duration
+// (staticDuration + SageMaker-predicted delay) from the current target arrival.
+// For TRANSIT steps with a timetable, snaps to the latest real departure that fits.
+// A snapped departure earlier than the arithmetic required time cascades backwards —
+// the preceding step must finish earlier to make the connection.
+//
+// steps:          route.steps array
+// timetableCache: { [typeDate]: { schedule: { MON: ['HH:MM', ...], ... } } }
+// dayOfWeek:      e.g. 'MON'
+// arriveByMins:   arriveBy in total minutes from midnight (UTC)
+// stepDelays:     Map<stepIndex, delaySeconds> from SageMaker predictions
+//
+// Returns { departMins, cascadeReasons }
+const simulateCascadeBackwards = (steps, timetableCache, dayOfWeek, arriveByMins, stepDelays) => {
+  const cascadeReasons = [];
+  let currentTarget = arriveByMins;
+
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const step = steps[i];
+    const stepMins = parseDurationToMinutes(step.staticDuration);
+    if (stepMins === null) continue; // pre-Phase 2 route — no per-step duration stored
+
+    const stepDelayMins = Math.round((stepDelays.get(i) ?? 0) / 60);
+    const effectiveMins = stepMins + stepDelayMins;
+
+    if (step.travelMode === 'WALK') {
+      currentTarget -= effectiveMins;
+
+    } else if (step.travelMode === 'TRANSIT' && step.startLocation?.latLng) {
+      const requiredDeparture = currentTarget - effectiveMins;
+      const lineShortName     = step.transitDetails?.transitLine?.nameShort;
+
+      if (lineShortName) {
+        const { latitude: lat, longitude: lng } = step.startLocation.latLng;
+        const timetableKey = `TIMETABLE#${lineShortName}#${lat.toFixed(4)}#${lng.toFixed(4)}`;
+        const timetable    = timetableCache[timetableKey];
+
+        if (timetable?.schedule) {
+          const dayDepartures = timetable.schedule[dayOfWeek] || [];
+          const snapped = snapToScheduledDeparture(dayDepartures, requiredDeparture);
+          if (snapped !== null) {
+            if (snapped < requiredDeparture - 1) {
+              const h = String(Math.floor(snapped / 60)).padStart(2, '0');
+              const m = String(snapped % 60).padStart(2, '0');
+              cascadeReasons.push(`Catch the ${h}:${m} ${lineShortName} service`);
+            }
+            currentTarget = snapped;
+          } else {
+            currentTarget = requiredDeparture; // no prior service found — fall back to arithmetic
+          }
+        } else {
+          currentTarget = requiredDeparture; // no timetable yet — graceful fallback
+        }
+      } else {
+        currentTarget = requiredDeparture;
+      }
+    }
+  }
+
+  return { departMins: currentTarget, cascadeReasons };
 };
 
 // ─── DynamoDB Fetch Helpers ───────────────────────────────────────────────────
 
-// Fetch WEATHER#, EVENTS#, ROADWORKS#, TRANSIT#, and HOLIDAY# for all unique cityKey + date
-// combinations using BatchGetItem.
-// Returns { weatherCache, eventsCache, roadworksCache, transitCache, holidayCache, dayDateMap }
-const fetchDelaysCache = async (cityKeys, daysOfWeekSet, today) => {
-  const weatherCache = {};
-  const eventsCache = {};
+// Fetch WEATHER#, EVENTS#, ROADWORKS#, TRANSIT#, HOLIDAY#, and TIMETABLE# records
+// in a single BatchGetItem. Date-scoped records keyed by cityKey × date; TIMETABLE#
+// records keyed by cityKey × timetable key (static, updated weekly by timetable pipeline).
+// Returns { weatherCache, eventsCache, roadworksCache, transitCache, holidayCache, timetableCache, dayDateMap }
+const fetchDelaysCache = async (cityKeys, daysOfWeekSet, today, timetableKeys = []) => {
+  const weatherCache   = {};
+  const eventsCache    = {};
   const roadworksCache = {};
-  const transitCache = {};
-  const holidayCache = {};
+  const transitCache   = {};
+  const holidayCache   = {};
+  const timetableCache = {}; // { [typeDate]: { schedule: { MON: ['HH:MM', ...], ... } } }
 
   // Resolve the next UTC date for each unique day of week once
   const dayDateMap = {};
@@ -545,22 +679,22 @@ const fetchDelaysCache = async (cityKeys, daysOfWeekSet, today) => {
 
   // Initialise caches with empty defaults so missing records don't cause undefined lookups
   for (const cityKey of cityKeys) {
-    weatherCache[cityKey] = {};
-    eventsCache[cityKey] = {};
+    weatherCache[cityKey]   = {};
+    eventsCache[cityKey]    = {};
     roadworksCache[cityKey] = {};
-    transitCache[cityKey] = {};
-    holidayCache[cityKey] = {};
+    transitCache[cityKey]   = {};
+    holidayCache[cityKey]   = {};
     for (const day of daysOfWeekSet) {
       const dateStr = dayDateMap[day];
-      weatherCache[cityKey][dateStr] = [];
-      eventsCache[cityKey][dateStr] = [];
+      weatherCache[cityKey][dateStr]   = [];
+      eventsCache[cityKey][dateStr]    = [];
       roadworksCache[cityKey][dateStr] = null; // null = no ROADWORKS# record written for this date
-      transitCache[cityKey][dateStr] = null; // null = no TRANSIT# record written for this date
-      holidayCache[cityKey][dateStr] = null; // null = not a public holiday
+      transitCache[cityKey][dateStr]   = null; // null = no TRANSIT# record written for this date
+      holidayCache[cityKey][dateStr]   = null; // null = not a public holiday
     }
   }
 
-  // Build all keys — all 5 record types for every cityKey × day combination
+  // Build all keys — 5 date-scoped record types per cityKey × day, plus static TIMETABLE# keys
   const keys = [];
   for (const cityKey of cityKeys) {
     for (const day of daysOfWeekSet) {
@@ -572,6 +706,8 @@ const fetchDelaysCache = async (cityKeys, daysOfWeekSet, today) => {
       keys.push(marshall({ cityKey, typeDate: `HOLIDAY#${dateStr}` }));
     }
   }
+  // TIMETABLE# keys are static (not date-scoped) — appended to the same batch
+  for (const key of timetableKeys) keys.push(key);
 
   const results = await batchGet(client, DELAYS_TABLE, keys, item => `${item.cityKey}|${item.typeDate}`, unmarshall);
 
@@ -589,13 +725,14 @@ const fetchDelaysCache = async (cityKeys, daysOfWeekSet, today) => {
         routeAlerts: item.routeAlerts || []
       };
     } else if (type === 'HOLIDAY') {
-      // SK is HOLIDAY#YYYY-MM-DD — extract the date portion after the first '#'
       const date = item.typeDate.slice('HOLIDAY#'.length);
       holidayCache[item.cityKey][date] = { name: item.name, types: item.types || [] };
+    } else if (type === 'TIMETABLE') {
+      timetableCache[item.typeDate] = { schedule: item.schedule || {} };
     }
   }
 
-  return { weatherCache, eventsCache, roadworksCache, transitCache, holidayCache, dayDateMap };
+  return { weatherCache, eventsCache, roadworksCache, transitCache, holidayCache, timetableCache, dayDateMap };
 };
 
 
@@ -618,137 +755,294 @@ exports.handler = async (event) => {
     const routeMap = await batchGet(client, USER_ROUTE_TABLE, routeKeys, item => item.routeId, unmarshall);
     console.log(`Fetched ${Object.keys(routeMap).length} route records`);
 
-    // ── Step 2: Determine unique cityKeys and daysOfWeek across this chunk ────
-    const cityKeySet = new Set();
-    const daysOfWeekSet = new Set();
+    // ── Step 2: Determine unique cityKeys, daysOfWeek, and TIMETABLE# keys ──
+    const cityKeySet       = new Set();
+    const daysOfWeekSet    = new Set();
+    const timetableKeysSeen = new Set(); // dedupe: cityKey|typeDate
+    const timetableKeys    = [];         // DDB-marshalled keys for fetchDelaysCache
 
     for (const ref of routeRefs) {
       const route = routeMap[ref.routeId];
       if (!route) continue;
       if (route.cityKey) cityKeySet.add(route.cityKey);
       for (const day of ref.daysOfWeek) daysOfWeekSet.add(day);
+
+      // Collect unique TIMETABLE# keys for TRANSIT steps that have schedule data
+      if (route.travelMode === 'TRANSIT' && route.steps?.length > 0) {
+        for (const step of route.steps) {
+          if (step.travelMode === 'TRANSIT'
+              && step.transitDetails?.transitLine?.nameShort
+              && step.startLocation?.latLng) {
+            const { latitude: lat, longitude: lng } = step.startLocation.latLng;
+            const lineShortName = step.transitDetails.transitLine.nameShort;
+            const typeDate      = `TIMETABLE#${lineShortName}#${lat.toFixed(4)}#${lng.toFixed(4)}`;
+            const dedupeKey     = `${route.cityKey}|${typeDate}`;
+            if (!timetableKeysSeen.has(dedupeKey)) {
+              timetableKeysSeen.add(dedupeKey);
+              timetableKeys.push(marshall({ cityKey: route.cityKey, typeDate }));
+            }
+          }
+        }
+      }
     }
 
-    // ── Step 3: Fetch weather + events once per cityKey per day ───────────────
-    const { weatherCache, eventsCache, roadworksCache, transitCache, holidayCache, dayDateMap } = await fetchDelaysCache(
-      [...cityKeySet],
-      [...daysOfWeekSet],
-      today
-    );
+    // ── Step 3: Fetch delay data and timetable records in one batch ──────────
+    const { weatherCache, eventsCache, roadworksCache, transitCache, holidayCache, timetableCache, dayDateMap } =
+      await fetchDelaysCache([...cityKeySet], [...daysOfWeekSet], today, timetableKeys);
 
-    console.log(`Fetched delay data for ${cityKeySet.size} cities across ${daysOfWeekSet.size} days`);
+    console.log(`Fetched delay data for ${cityKeySet.size} cities across ${daysOfWeekSet.size} days, ${timetableKeys.length} timetable records`);
 
-    // ── Step 4: Build FORECAST# records for every route in the chunk ──────────
-    const forecastItems = [];
+    // ── Step 4: Collect all feature vectors from every route (no SM calls yet) ─
+    // Feature collection is fully synchronous. Each valid route appends its vectors
+    // to the chunk-level road/rail arrays tagged with a routeIdx so results can be
+    // mapped back after the single pair of SM calls in Step 5.
+    //
+    // TRANSIT routes: one road entry + one rail entry per (step, day) combination.
+    //   stepIndex is the step array index — used to accumulate per-step delays.
+    // Non-TRANSIT routes: one road entry per day, stepIndex null signals whole-route.
+    let   skippedRoutes   = 0;
+    const validRoutes     = []; // routes that survived feature collection
+    const routeDayData    = []; // dayData per valid route, parallel to validRoutes
 
-    let skippedRoutes = 0;
+    const chunkRoadInputs = []; // all road feature vectors across all routes/days/steps
+    const chunkRoadKeys   = []; // { routeIdx, stepIndex, dayOfWeek } — parallel to chunkRoadInputs
+    const chunkRailInputs = []; // all rail feature vectors across all routes/days/steps
+    const chunkRailKeys   = []; // { routeIdx, stepIndex, dayOfWeek } — parallel to chunkRailInputs
 
     for (const ref of routeRefs) {
-      // Per-route try/catch — one bad route must not kill the entire chunk.
-      // Failed routes are logged and skipped; they will be retried on the next nightly run.
       try {
         const route = routeMap[ref.routeId];
-
         if (!route) {
           console.warn(`Route not found for userId=${ref.userId} routeId=${ref.routeId} — skipping`);
           skippedRoutes++;
           continue;
         }
 
-        const days = {};
-
+        // Precompute per-day corridor context — all filtering done once per day
+        // so the inner step loop only reads pre-filtered arrays.
+        const dayData = {};
         for (const dayOfWeek of ref.daysOfWeek) {
-          const dateStr = dayDateMap[dayOfWeek];
-          const hourly = weatherCache[route.cityKey]?.[dateStr] ?? [];
-          const allEvents = eventsCache[route.cityKey]?.[dateStr] ?? [];
-          const allRoadworks = roadworksCache[route.cityKey]?.[dateStr] ?? null;
+          const dateStr       = dayDateMap[dayOfWeek];
+          const hourly        = weatherCache[route.cityKey]?.[dateStr] ?? [];
+          const allEvents     = eventsCache[route.cityKey]?.[dateStr] ?? [];
+          const allRoadworks  = roadworksCache[route.cityKey]?.[dateStr] ?? null;
           const transitRecord = transitCache[route.cityKey]?.[dateStr] ?? null;
+          const holiday       = holidayCache[route.cityKey]?.[dateStr] ?? null;
+          const arriveByUtc   = localTimeToUtcHHMM(ref.arriveBy, ref.timezone, dateStr);
 
-          // Convert arriveBy from local time to UTC for this specific date
-          // Uses IANA timezone rules so DST transitions are handled automatically:
-          //   08:45 Europe/Dublin on a summer date  → 07:45 UTC
-          //   08:45 Europe/Dublin on a winter date  → 08:45 UTC
-          const arriveByUtc = localTimeToUtcHHMM(ref.arriveBy, ref.timezone, dateStr);
-
-          // Filter events to user's commute window [departTime, arriveBy], then to corridor.
-          // Events use Ticketmaster's localTime (venue local time) — compare against the user's
-          // local arriveBy so both sides are in the same timezone frame.
-          // Weather comparisons use arriveByUtc — Open-Meteo data is in UTC.
-          const commuteEvents = filterCommuteEvents(allEvents, ref.arriveBy, route.staticDuration);
-          const corridorEvents = filterCorridorEvents(commuteEvents, route);
-          const commuteRoadworks = filterCommuteWindowRoadworks(allRoadworks ?? [], arriveByUtc, route.staticDuration, dateStr);
+          const commuteEvents     = filterCommuteEvents(allEvents, ref.arriveBy, route.staticDuration);
+          const corridorEvents    = filterCorridorEvents(commuteEvents, route);
+          const commuteRoadworks  = filterCommuteWindowRoadworks(allRoadworks ?? [], arriveByUtc, route.staticDuration, dateStr);
           const corridorRoadworks = filterCorridorRoadworks(commuteRoadworks, route);
-          const commuteTransitRecord = filterCommuteWindowTransitAlerts(transitRecord, arriveByUtc, route.staticDuration, dateStr);
-          const transitAlerts = filterCorridorTransitAlerts(commuteTransitRecord, route);
-          const holiday = holidayCache[route.cityKey]?.[dateStr] ?? null;
+          const commuteTransit    = filterCommuteWindowTransitAlerts(transitRecord, arriveByUtc, route.staticDuration, dateStr);
+          const transitAlerts     = filterCorridorTransitAlerts(commuteTransit, route);
 
-          // Phase 3: Sage-predicted delay from SageMaker. Falls back to rule-based
-          // extraBufferMins (0) on endpoint error so a cold pipeline never blocks forecasts.
-          let extraBufferMins = 0;
-          let mlLo = null;
-          let mlHi = null;
-          try {
-            const smFeatures = buildSmFeatures(
-              route, ref, hourly, corridorEvents, corridorRoadworks,
-              holiday, dayOfWeek, arriveByUtc, dateStr
+          dayData[dayOfWeek] = {
+            dateStr, hourly, allEvents, allRoadworks, transitRecord,
+            holiday, arriveByUtc, corridorEvents, corridorRoadworks, transitAlerts,
+          };
+        }
+
+        const routeIdx = validRoutes.length;
+        validRoutes.push({ ref, route });
+        routeDayData.push(dayData);
+
+        if (route.travelMode === 'TRANSIT' && route.steps?.length > 0) {
+          for (const dayOfWeek of ref.daysOfWeek) {
+            const { hourly, corridorEvents, corridorRoadworks, transitAlerts, holiday, arriveByUtc } = dayData[dayOfWeek];
+            for (const [i, step] of route.steps.entries()) {
+              const vehicleType = step.travelMode === 'TRANSIT'
+                ? (step.transitDetails?.transitLine?.vehicle?.type ?? 'BUS')
+                : step.travelMode;
+              if (RAIL_VEHICLE_TYPES.has(vehicleType)) {
+                const features = buildRailFeatures(step, route, ref, hourly, corridorEvents, transitAlerts, holiday, dayOfWeek, arriveByUtc);
+                if (features) { chunkRailInputs.push(features); chunkRailKeys.push({ routeIdx, stepIndex: i, dayOfWeek }); }
+              } else {
+                const features = buildRoadFeatures(step, route, ref, hourly, corridorEvents, corridorRoadworks, holiday, dayOfWeek, arriveByUtc);
+                if (features) { chunkRoadInputs.push(features); chunkRoadKeys.push({ routeIdx, stepIndex: i, dayOfWeek }); }
+              }
+            }
+          }
+        } else {
+          // Non-TRANSIT: one whole-route feature vector per day; stepIndex null distinguishes
+          // these from TRANSIT step entries when mapping results back in Step 5.
+          for (const dayOfWeek of ref.daysOfWeek) {
+            const { hourly, corridorEvents, corridorRoadworks, holiday, arriveByUtc } = dayData[dayOfWeek];
+            const features = buildRoadFeatures(null, route, ref, hourly, corridorEvents, corridorRoadworks, holiday, dayOfWeek, arriveByUtc);
+            if (features) { chunkRoadInputs.push(features); chunkRoadKeys.push({ routeIdx, stepIndex: null, dayOfWeek }); }
+          }
+        }
+
+      } catch (err) {
+        console.error(`Feature collection failed for userId=${ref.userId} routeId=${ref.routeId} — skipping:`, err);
+        skippedRoutes++;
+      }
+    }
+
+    // ── Step 5: Two SM calls for the entire chunk ─────────────────────────────
+    // One road call and one rail call cover all routes, all days, all steps.
+    // Per-model catch is independent — rail failure does not zero road results.
+    console.log(`SM batch: ${chunkRoadInputs.length} road vectors + ${chunkRailInputs.length} rail vectors across ${validRoutes.length} routes`);
+
+    const [allRoadResults, allRailResults] = await Promise.all([
+      (chunkRoadInputs.length > 0 ? callRoadModelBatch(chunkRoadInputs) : Promise.resolve([]))
+        .catch(err => {
+          console.warn(`Road SM batch failed for chunk — using 0 delays: ${err.message}`);
+          return chunkRoadInputs.map(() => ({ trafficDeltaSeconds: 0, lo: null, hi: null, reasonCodes: [] }));
+        }),
+      (chunkRailInputs.length > 0 ? callRailModelBatch(chunkRailInputs) : Promise.resolve([]))
+        .catch(err => {
+          console.warn(`Rail SM batch failed for chunk — using 0 delays: ${err.message}`);
+          return chunkRailInputs.map(() => ({ trafficDeltaSeconds: 0, lo: null, hi: null, reasonCodes: [] }));
+        }),
+    ]);
+
+    // Map results back into per-route per-day accumulators using the parallel key arrays.
+    // TRANSIT step entries (stepIndex set) go into stepDelaysPerRoute.
+    // Non-TRANSIT whole-route entries (stepIndex null) go into dayResultsPerRoute.
+    const stepDelaysPerRoute      = validRoutes.map(({ ref }) =>
+      Object.fromEntries(ref.daysOfWeek.map(d => [d, new Map()])));
+    const stepReasonCodesPerRoute = validRoutes.map(({ ref }) =>
+      Object.fromEntries(ref.daysOfWeek.map(d => [d, new Set()])));
+    const dayResultsPerRoute      = validRoutes.map(({ ref }) =>
+      Object.fromEntries(ref.daysOfWeek.map(d => [d, null])));
+
+    allRoadResults.forEach((result, j) => {
+      const { routeIdx, stepIndex, dayOfWeek } = chunkRoadKeys[j];
+      if (stepIndex !== null) {
+        stepDelaysPerRoute[routeIdx][dayOfWeek].set(stepIndex, result.trafficDeltaSeconds ?? 0);
+        for (const code of (result.reasonCodes ?? [])) stepReasonCodesPerRoute[routeIdx][dayOfWeek].add(code);
+      } else {
+        dayResultsPerRoute[routeIdx][dayOfWeek] = result;
+      }
+    });
+    allRailResults.forEach((result, j) => {
+      const { routeIdx, stepIndex, dayOfWeek } = chunkRailKeys[j];
+      stepDelaysPerRoute[routeIdx][dayOfWeek].set(stepIndex, result.trafficDeltaSeconds ?? 0);
+      for (const code of (result.reasonCodes ?? [])) stepReasonCodesPerRoute[routeIdx][dayOfWeek].add(code);
+    });
+
+    // ── Step 6: Build FORECAST# items ────────────────────────────────────────
+    const forecastItems = [];
+
+    for (let routeIdx = 0; routeIdx < validRoutes.length; routeIdx++) {
+      try {
+        const { ref, route } = validRoutes[routeIdx];
+        const dayData = routeDayData[routeIdx];
+        const days    = {};
+
+        if (route.travelMode === 'TRANSIT' && route.steps?.length > 0) {
+          for (const dayOfWeek of ref.daysOfWeek) {
+            const { dateStr, hourly, allEvents, allRoadworks, transitRecord,
+                    corridorEvents, corridorRoadworks, transitAlerts, holiday, arriveByUtc } = dayData[dayOfWeek];
+
+            const stepDelays      = stepDelaysPerRoute[routeIdx][dayOfWeek];
+            const mlReasonCodes   = [...stepReasonCodesPerRoute[routeIdx][dayOfWeek]];
+            const totalDeltaSecs  = [...stepDelays.values()].reduce((s, v) => s + v, 0);
+            const extraBufferMins = Math.max(0, Math.round(totalDeltaSecs / 60));
+
+            const [arriveHour, arriveMin] = arriveByUtc.split(':').map(Number);
+            const arriveByMins = arriveHour * 60 + arriveMin;
+
+            // Run timetable cascade inline — snaps to real scheduled departures and propagates
+            // connection constraints backwards. Falls back gracefully per step when no timetable
+            // data exists (new lines, data not yet populated). No separate Lambda needed.
+            const { departMins, cascadeReasons } = simulateCascadeBackwards(
+              route.steps, timetableCache, dayOfWeek, arriveByMins, stepDelays
             );
-            const mlResult = await callDelayModel(smFeatures);
-            extraBufferMins = Math.max(0, Math.round(mlResult.trafficDeltaSeconds / 60));
-            mlLo = mlResult.lo;
-            mlHi = mlResult.hi;
-          } catch (smErr) {
-            console.warn(`SageMaker unavailable for ${ref.userId}/${ref.routeId} ${dayOfWeek} — using 0 buffer: ${smErr.message}`);
+
+            const base             = new Date(`${dateStr}T00:00:00Z`);
+            const adjustedDepartBy = new Date(base.getTime() + departMins * 60_000)
+              .toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+            const reasonParts = buildReasoningFromCodes(
+              mlReasonCodes, corridorEvents, corridorRoadworks, transitAlerts, holiday, route.travelMode
+            );
+            if (holiday) {
+              const hasRailStep = route.steps.some(s =>
+                RAIL_VEHICLE_TYPES.has(s.transitDetails?.transitLine?.vehicle?.type ?? '')
+              );
+              if (hasRailStep) reasonParts.push(`Public holiday (${holiday.name}) — verify rail timetables before travel`);
+            }
+
+            let reasoning = reasonParts.length > 0
+              ? reasonParts.join('. ')
+              : 'Normal conditions — no disruptions expected.';
+
+            // Append timetable connection reasons (e.g. "Catch the 08:10 X service")
+            if (cascadeReasons.length > 0) {
+              const base = reasoning === 'Normal conditions — no disruptions expected.' ? '' : reasoning;
+              reasoning  = base ? `${base}. ${cascadeReasons.join('. ')}` : cascadeReasons.join('. ');
+            }
+
+            days[dayOfWeek] = {
+              forecastDate: dateStr,
+              recommendation: { adjustedDepartBy, extraBufferMins, reasoning, mlLo: null, mlHi: null },
+              hasWeatherData:   hourly.length > 0,
+              hasEventData:     allEvents.length > 0,
+              hasRoadworksData: allRoadworks !== null,
+              hasTransitData:   transitRecord !== null,
+              hasHolidayData:   holiday !== null,
+            };
+
+            const corridorSummary  = corridorEvents.map(ev => `${ev.name}(r=${getEventRadius(ev.capacity).toFixed(1)}km)`).join(', ') || 'none';
+            const roadworksSummary = corridorRoadworks.map(inc => inc.description || 'unnamed').join(', ') || 'none';
+            console.log(`${ref.userId} ${ref.routeId} ${dayOfWeek} [${dateStr}]: arriveBy=${ref.arriveBy} local → ${arriveByUtc} UTC, depart=${adjustedDepartBy}, buffer=${extraBufferMins}mins${cascadeReasons.length > 0 ? ` cascade=[${cascadeReasons.join(', ')}]` : ''}, corridorEvents=[${corridorSummary}], roadworks=[${roadworksSummary}], holiday=${holiday?.name ?? 'none'}`);
           }
 
-          // Rule-based reasoning text for the UI (events, roadworks, weather, holiday).
-          const { reasoning } = getRecommendation({
-            hourly,
-            corridorEvents,
-            corridorRoadworks,
-            transitAlerts,
-            holiday,
-            travelMode: route.travelMode,
-            arriveBy: arriveByUtc,
-            staticDuration: route.staticDuration,
-            forecastDate: dateStr
-          });
+        } else {
+          for (const dayOfWeek of ref.daysOfWeek) {
+            const { dateStr, hourly, allEvents, allRoadworks, transitRecord,
+                    corridorEvents, corridorRoadworks, transitAlerts, holiday, arriveByUtc } = dayData[dayOfWeek];
 
-          // Departure calculation uses Sage-predicted extraBufferMins.
-          const [arriveHour, arriveMin] = arriveByUtc.split(':').map(Number);
-          const departMins = (arriveHour * 60 + arriveMin) - route.staticDuration - extraBufferMins;
-          const base = new Date(`${dateStr}T00:00:00Z`);
-          const adjustedDepartBy = new Date(base.getTime() + departMins * 60_000)
-            .toISOString().replace(/\.\d{3}Z$/, 'Z');
+            const mlResult        = dayResultsPerRoute[routeIdx][dayOfWeek] ?? { trafficDeltaSeconds: 0, lo: null, hi: null, reasonCodes: [] };
+            const extraBufferMins = Math.max(0, Math.round(mlResult.trafficDeltaSeconds / 60));
+            const mlLo            = mlResult.lo  ?? null;
+            const mlHi            = mlResult.hi  ?? null;
+            const mlReasonCodes   = mlResult.reasonCodes ?? [];
 
-          const recommendation = { adjustedDepartBy, extraBufferMins, reasoning, mlLo, mlHi };
+            const [arriveHour, arriveMin] = arriveByUtc.split(':').map(Number);
+            const arriveByMins = arriveHour * 60 + arriveMin;
+            const departMins   = arriveByMins - route.staticDuration - extraBufferMins;
 
-          // forecastDate lets Android anchor the ISO adjustedDepartBy to the correct calendar date
-          // for timezone conversion — no client-side date computation required
-          days[dayOfWeek] = {
-            forecastDate: dateStr,
-            recommendation,
-            hasWeatherData: hourly.length > 0,
-            hasEventData: allEvents.length > 0,
-            hasRoadworksData: allRoadworks !== null,
-            hasTransitData: transitRecord !== null,
-            hasHolidayData: holiday !== null
-          };
+            const base             = new Date(`${dateStr}T00:00:00Z`);
+            const adjustedDepartBy = new Date(base.getTime() + departMins * 60_000)
+              .toISOString().replace(/\.\d{3}Z$/, 'Z');
 
-          const corridorSummary = corridorEvents.map(ev => `${ev.name}(r=${getEventRadius(ev.capacity).toFixed(1)}km)`).join(', ') || 'none';
-          const roadworksSummary = corridorRoadworks.map(inc => inc.description || 'unnamed').join(', ') || 'none';
-          console.log(`${ref.userId} ${ref.routeId} ${dayOfWeek} [${dateStr}]: arriveBy=${ref.arriveBy} local → ${arriveByUtc} UTC, depart=${recommendation.adjustedDepartBy}, buffer=${recommendation.extraBufferMins}mins, corridorEvents=[${corridorSummary}], roadworks=[${roadworksSummary}], holiday=${holiday?.name ?? 'none'}`);
+            const reasonParts = buildReasoningFromCodes(
+              mlReasonCodes, corridorEvents, corridorRoadworks, transitAlerts, holiday, route.travelMode
+            );
+            const reasoning = reasonParts.length > 0
+              ? reasonParts.join('. ')
+              : 'Normal conditions — no disruptions expected.';
+
+            days[dayOfWeek] = {
+              forecastDate: dateStr,
+              recommendation: { adjustedDepartBy, extraBufferMins, reasoning, mlLo, mlHi },
+              hasWeatherData:   hourly.length > 0,
+              hasEventData:     allEvents.length > 0,
+              hasRoadworksData: allRoadworks !== null,
+              hasTransitData:   transitRecord !== null,
+              hasHolidayData:   holiday !== null,
+            };
+
+            const corridorSummary  = corridorEvents.map(ev => `${ev.name}(r=${getEventRadius(ev.capacity).toFixed(1)}km)`).join(', ') || 'none';
+            const roadworksSummary = corridorRoadworks.map(inc => inc.description || 'unnamed').join(', ') || 'none';
+            console.log(`${ref.userId} ${ref.routeId} ${dayOfWeek} [${dateStr}]: arriveBy=${ref.arriveBy} local → ${arriveByUtc} UTC, depart=${adjustedDepartBy}, buffer=${extraBufferMins}mins, corridorEvents=[${corridorSummary}], roadworks=[${roadworksSummary}], holiday=${holiday?.name ?? 'none'}`);
+          }
         }
 
         forecastItems.push({
-          userId: ref.userId,
-          recordType: `FORECAST#${ref.routeId}`,
-          routeId: ref.routeId,
+          userId:      ref.userId,
+          recordType:  `FORECAST#${ref.routeId}`,
+          routeId:     ref.routeId,
           days,
-          generatedAt: new Date().toISOString()
+          generatedAt: new Date().toISOString(),
         });
 
       } catch (err) {
-        console.error(`Failed to process route userId=${ref.userId} routeId=${ref.routeId} — skipping:`, err);
+        const { ref } = validRoutes[routeIdx];
+        console.error(`Failed to build forecast for userId=${ref.userId} routeId=${ref.routeId} — skipping:`, err);
         skippedRoutes++;
       }
     }
@@ -757,7 +1051,7 @@ exports.handler = async (event) => {
       console.warn(`Chunk completed with ${skippedRoutes} skipped routes out of ${routeRefs.length}`);
     }
 
-    // ── Step 5: Write all FORECAST# records ──────────────────────────────────
+    // ── Step 7: Write all FORECAST# records ──────────────────────────────────
     const forecastRequests = forecastItems.map(item => ({ PutRequest: { Item: marshall(item) } }));
     await batchWrite(client, USER_ROUTE_TABLE, forecastRequests);
 

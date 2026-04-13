@@ -22,7 +22,7 @@ const ssm = new SSMClient({});
 
 const USER_ROUTE_TABLE = process.env.USER_ROUTE_TABLE;
 const DELAY_WORKER_QUEUE_URL = process.env.DELAY_WORKER_QUEUE_URL;
-const CHUNK_SIZE = 1000;
+const CHUNK_SIZE = 250;
 
 const LOCK_PARAM = '/routeApp/orchestratorLock';
 const LOCK_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour — treat lock as stale after this
