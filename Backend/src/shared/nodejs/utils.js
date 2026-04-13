@@ -429,6 +429,7 @@ const FIELD_MASK_BASE = [
 // Non-TRANSIT modes don't have transitDetails and the route-level polyline suffices.
 const FIELD_MASK_TRANSIT = [
   FIELD_MASK_BASE,
+  'routes.legs.steps.staticDuration',
   'routes.legs.steps.startLocation',
   'routes.legs.steps.endLocation',
   'routes.legs.steps.polyline.encodedPolyline',
@@ -593,6 +594,88 @@ const computeRoute = async (originPlaceId, destPlaceId, intermediates, travelMod
 
 // ─── Waypoint ─────────────────────────────────────────────────────────────────
 
+// ─── Transit Timetable Helpers ────────────────────────────────────────────────
+
+// Returns the next calendar date string (YYYY-MM-DD) for a given day name from a base date.
+// e.g. getNextDateForDayName('MON', new Date('2026-04-12')) → '2026-04-13'
+// Used by fetchTimetableForStop to query representative schedule dates per day-of-week.
+const getNextDateForDayName = (dayName, fromDate) => {
+  const days = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+  const targetDay = days.indexOf(dayName);
+  const fromDay = fromDate.getDay();
+  let daysAhead = targetDay - fromDay;
+  if (daysAhead <= 0) daysAhead += 7;
+  const next = new Date(fromDate);
+  next.setDate(fromDate.getDate() + daysAhead);
+  return next.toISOString().split('T')[0];
+};
+
+// Fetches a full weekly departure schedule for a transit line at a stop location.
+// lat/lng: departure stop coordinates from a Google Routes API step startLocation.latLng.
+// lineShortName: transit line identifier e.g. "X28" from step.transitDetails.transitLine.nameShort.
+// apiKey: Transitland API key.
+//
+// Step 1 — resolve the stop onestop_id via a 150m coordinate radius search.
+// Step 2 — for each day of week, query Transitland stop_times for the next occurrence
+//           of that day and filter departures to the requested lineShortName.
+//
+// Returns { schedule: { MON: ['HH:MM', ...], TUE: [...], ..., SUN: [...] } }
+// or null if the stop cannot be found or the API is unavailable.
+const fetchTimetableForStop = async (lat, lng, lineShortName, apiKey) => {
+  // Step 1: resolve stop onestop_id
+  let stopOnestopId;
+  try {
+    const res = await fetch(
+      `https://transit.land/api/v2/rest/stops?lat=${lat}&lon=${lng}&radius=150&per_page=5`,
+      { headers: { apikey: apiKey } }
+    );
+    if (!res.ok) {
+      console.warn(`fetchTimetableForStop: stops lookup failed (${res.status}) for ${lat},${lng}`);
+      return null;
+    }
+    const data = await res.json();
+    const stop = (data.stops || [])[0];
+    if (!stop) {
+      console.warn(`fetchTimetableForStop: no stop within 150m of ${lat},${lng}`);
+      return null;
+    }
+    stopOnestopId = stop.onestop_id;
+  } catch (err) {
+    console.warn(`fetchTimetableForStop: stops API error for ${lat},${lng}:`, err.message);
+    return null;
+  }
+
+  // Step 2: query stop_times for each day of week
+  const today = new Date();
+  const dayNames = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+  const schedule = {};
+
+  await Promise.all(dayNames.map(async (dayName) => {
+    const date = getNextDateForDayName(dayName, today);
+    try {
+      const res = await fetch(
+        `https://transit.land/api/v2/rest/stop_times?stop_onestop_id=${encodeURIComponent(stopOnestopId)}&service_date=${date}&per_page=500`,
+        { headers: { apikey: apiKey } }
+      );
+      if (!res.ok) { schedule[dayName] = []; return; }
+      const data = await res.json();
+      // GTFS departure_time is HH:MM:SS and may exceed 24:00:00 for post-midnight services.
+      // slice(0,5) gives HH:MM — numeric comparison in delayWorker handles values above 23:59 naturally.
+      const departures = (data.stop_times || [])
+        .filter(st => st.trip?.route?.route_short_name === lineShortName)
+        .map(st => st.departure_time?.slice(0, 5))
+        .filter(Boolean)
+        .sort();
+      schedule[dayName] = [...new Set(departures)];
+    } catch (err) {
+      console.warn(`fetchTimetableForStop: stop_times failed for ${lineShortName} ${dayName} (${date}):`, err.message);
+      schedule[dayName] = [];
+    }
+  }));
+
+  return { schedule };
+};
+
 // Normalise a waypoint for storage.
 // w is the client-sent waypoint { placeId, label }.
 // resolvedLatLng is { latitude, longitude } from the Routes API response.
@@ -608,4 +691,23 @@ const normaliseWaypoint = (w, resolvedLatLng) => ({
   placeId: w.placeId
 });
 
-module.exports = { chunkArray, parseDurationToMinutes, batchGet, batchWrite, callWithRetry, fetchHttpJson, response, getUserId, parseBody, MAX_ROUTES_PER_USER, VALID_DAYS, VALID_TRAVEL_MODES, DAY_MAP, isValidIANATimezone, computeArrivalUTC, ARRIVE_BY_REGEX, validateWaypoint, validateAddressComponents, extractCityFromComponents, buildCityObject, normaliseWaypoint, getDistanceKm, decodePolyline, UUID_REGEX, getRoutesApiKey, callRoutesApi, computeRoute, getTransitlandApiKey, discoverTransitlandFeedIds, WMO_CONDITION };
+// ─── Vehicle type classification ─────────────────────────────────────────────
+// Maps Google Routes API TransitVehicle.type values to the SageMaker model that
+// best predicts delay for that vehicle category.
+//
+// Road model  — surface vehicles subject to traffic, roadworks, and events.
+// Rail model  — dedicated right-of-way vehicles with timetable-driven delay patterns.
+//
+// Anything not present in RAIL_VEHICLE_TYPES is treated as road (safe default).
+// Both sets are exported so Dagon can apply the same split when generating training data.
+const ROAD_VEHICLE_TYPES = new Set([
+  'BUS', 'TRAM', 'INTERCITY_BUS', 'TROLLEYBUS', 'SHARE_TAXI',
+  'FERRY', 'CABLE_CAR', 'WALK'
+]);
+
+const RAIL_VEHICLE_TYPES = new Set([
+  'RAIL', 'SUBWAY', 'COMMUTER_TRAIN', 'HIGH_SPEED_TRAIN', 'LONG_DISTANCE_TRAIN',
+  'MONORAIL', 'FUNICULAR', 'GONDOLA_LIFT'
+]);
+
+module.exports = { chunkArray, parseDurationToMinutes, batchGet, batchWrite, callWithRetry, fetchHttpJson, response, getUserId, parseBody, MAX_ROUTES_PER_USER, VALID_DAYS, VALID_TRAVEL_MODES, DAY_MAP, isValidIANATimezone, computeArrivalUTC, ARRIVE_BY_REGEX, validateWaypoint, validateAddressComponents, extractCityFromComponents, buildCityObject, normaliseWaypoint, getDistanceKm, decodePolyline, UUID_REGEX, getRoutesApiKey, callRoutesApi, computeRoute, getTransitlandApiKey, discoverTransitlandFeedIds, WMO_CONDITION, getNextDateForDayName, fetchTimetableForStop, ROAD_VEHICLE_TYPES, RAIL_VEHICLE_TYPES };

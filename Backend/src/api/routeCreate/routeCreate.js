@@ -261,7 +261,10 @@ exports.handler = async (event) => {
         intermediates: routeItem.intermediates,
         destination: routeItem.destination,
         geometry: routeItem.geometry,
-        steps: routeItem.steps,
+        // TODO: expose staticDuration per step to Android once the step model is updated.
+        // Stored in DynamoDB for delayWorker per-step predictions — stripped here to avoid
+        // an unplanned Android contract change.
+        steps: routeItem.steps.map(({ staticDuration: _sd, ...rest }) => rest),
         travelMode: routeItem.travelMode,
         staticDuration,
         trafficDuration: trafficDuration ?? null,
