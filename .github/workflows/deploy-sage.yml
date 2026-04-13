@@ -25,7 +25,9 @@ jobs:
       - uses: aws-actions/setup-sam@v2
 
       - name: Build logic layer artifacts
-        run: tar -czf Sage/src/logic/sageRoadModel.tar.gz -C Sage/src/logic sageRoadModel.py
+        run: |
+          tar -czf Sage/src/logic/sageRoadModel.tar.gz -C Sage/src/logic sageRoadModel.py requirements.txt
+          tar -czf Sage/src/logic/sageRailModel.tar.gz -C Sage/src/logic sageRailModel.py requirements.txt
 
       - run: sam build
         working-directory: Sage

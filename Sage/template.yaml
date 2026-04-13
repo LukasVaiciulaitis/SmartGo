@@ -232,7 +232,6 @@ Resources:
   # -------------------------------
 
   # Road model SSM params -- written by sageWorker, read by Backend and dashboards.
-  # Rail equivalents (/smartgo/sage/rail/*) are created when the rail model is added.
   RoadEndpointNameParam:
     Type: AWS::SSM::Parameter
     Properties:
@@ -259,6 +258,31 @@ Resources:
       Type: String
       Value: '{}'
       Description: Road model last pipeline evaluation metrics (rmse, bias, mae, ciCoverage, gatePass)
+
+  # Rail model SSM params -- mirrors the road set; written by sageWorker, read by Backend and dashboards.
+  RailEndpointNameParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /smartgo/sage/rail/endpointName
+      Type: String
+      Value: smartgo-rail-endpoint
+      Description: Active SageMaker endpoint name for the rail delay model
+
+  RailGlobalCalibrationParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /smartgo/sage/rail/globalCalibration
+      Type: String
+      Value: '{"slope":1.0,"intercept":0.0}'
+      Description: Rail model global linear calibration fallback {slope, intercept} -- updated each pipeline run
+
+  RailLastEvaluationParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /smartgo/sage/rail/lastEvaluation
+      Type: String
+      Value: '{}'
+      Description: Rail model last pipeline evaluation metrics (rmse, bias, mae, ciCoverage, gatePass)
 
   # -------------------------------
   # S3 -- sage data bucket
@@ -484,7 +508,7 @@ Resources:
     Type: AWS::Events::Rule
     Properties:
       Name: sagePipelineSchedule
-      Description: "19:00 UTC every Sunday -- weekly baseline retrain regardless of drift"
+      Description: "19:00 UTC every Sunday -- weekly road model retrain"
       ScheduleExpression: cron(0 19 ? * SUN *)
       State: ENABLED
       Targets:
@@ -492,6 +516,20 @@ Resources:
           Arn: !Ref SagePipelineStateMachine
           RoleArn: !GetAtt SagePipelineScheduleRole.Arn
           Input: '{"modelType": "road"}'
+
+  # Rail fires 30 minutes after Road to avoid simultaneous SageMaker training jobs.
+  SageRailPipelineScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: sageRailPipelineSchedule
+      Description: "19:30 UTC every Sunday -- weekly rail model retrain (offset 30 min after road)"
+      ScheduleExpression: cron(30 19 ? * SUN *)
+      State: ENABLED
+      Targets:
+        - Id: sageRailPipelineTarget
+          Arn: !Ref SagePipelineStateMachine
+          RoleArn: !GetAtt SagePipelineScheduleRole.Arn
+          Input: '{"modelType": "rail"}'
 
   # -------------------------------
   # CLOUDWATCH -- pipeline failure alarm
@@ -527,6 +565,10 @@ Outputs:
   RoadEndpointName:
     Description: Road model SageMaker serverless endpoint (active after first gate-passing pipeline run)
     Value: smartgo-road-endpoint
+
+  RailEndpointName:
+    Description: Rail model SageMaker serverless endpoint (active after first gate-passing pipeline run)
+    Value: smartgo-rail-endpoint
 
   SagePipelineArn:
     Description: Step Functions state machine ARN for the Sage pipeline

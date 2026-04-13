@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# sageRoadModel.py
-# SageMaker sklearn container script for the SmartGo road delay model.
+# sageRailModel.py
+# SageMaker sklearn container script for the SmartGo rail delay model.
 # Handles both training (if __name__ == '__main__') and endpoint serving
 # (model_fn / input_fn / predict_fn / output_fn hooks called by the container).
 #
-# Training:  SageMaker runs this script via sagemaker_program = "sageRoadModel.py".
+# Training:  SageMaker runs this script via sagemaker_program = "sageRailModel.py".
 #            Trains three HistGradientBoostingRegressor models (q10, q50, q90),
 #            computes adaptive hierarchical calibration, evaluates on the held-out val
 #            split, and writes all artefacts to /opt/ml/model/.
@@ -13,18 +13,29 @@
 #
 # Serving:   SageMaker imports this module and calls model_fn / predict_fn per request.
 #            Input  (JSON): raw row fields -- departureTimeLocal, dayOfWeek, legType,
-#                           travelMode, distanceMeters, staticDurationSeconds,
+#                           distanceMeters, staticDurationSeconds,
 #                           weatherTempC, weatherPrecipMm, weatherWindKph, weatherCondition,
-#                           eventCount, maxEventCapacity, nearestEventKm, roadworksCount,
-#                           roadworksFraction, isHoliday
+#                           eventCount, maxEventCapacity, nearestEventKm, isHoliday,
+#                           hasServiceAlert, lineShortName
 #            Output (JSON): { trafficDeltaSeconds: int, lo: int, hi: int, reasonCodes: [...] }
 #                           lo/hi are the 10th/90th percentile calibrated confidence interval.
+#                           Field is named trafficDeltaSeconds for Backend compatibility.
 #                           reasonCodes are derived from SHAP feature attributions against the q50
 #                           model -- a code is emitted only when its feature(s) contributed ≥60s
 #                           to the prediction, not simply because the value was present in the input.
+#                           SERVICE_ALERT is an exception: it is not a model feature (not in the
+#                           feature matrix) so it is checked directly from the input value.
 #
 # Training input: 52-week rolling CSV from sageDataLoader via the 'train' channel.
 # Performs internal 80/20 random split: 80% training, 20% calibration + evaluation.
+#
+# Key differences from sageRoadModel:
+#   - No roadworksCount / roadworksFraction (no road construction data for rail)
+#   - No isEveningReturn (a road legType concept; rail uses timetable-based legType)
+#   - No isWalk / isBicycle (these are not rail travel modes)
+#   - avgFreeFlowSpeed renamed to avgScheduledSpeed: scheduled speed (distance / staticDuration)
+#     is a useful proxy for rail service type -- intercity trains vs local stopping services
+#     have systematically different delay characteristics
 
 import argparse
 import csv
@@ -47,7 +58,7 @@ from sklearn.model_selection import train_test_split
 FOG_CONDITIONS = {'Fog', 'Freezing Fog', 'Depositing Rime Fog'}
 MORNING_PEAK   = 8 * 60
 EVENING_PEAK   = 17 * 60
-FLOOR_FRACTION = 0.70  # prediction floor: cannot be lower than -30% of free-flow duration
+FLOOR_FRACTION = 0.70  # prediction floor: cannot be lower than -30% of scheduled duration
 
 def engineer(row):
     static   = int(row['staticDurationSeconds'])
@@ -62,7 +73,6 @@ def engineer(row):
         'cosHour':              math.cos(2 * math.pi * dep_mins / 1440),
         'minsFromMorningPeak':  abs(dep_mins - MORNING_PEAK),
         'minsFromEveningPeak':  abs(dep_mins - EVENING_PEAK),
-        'isEveningReturn':      1 if row.get('legType') == 'eveningReturn' else 0,
         'dayMon': 1 if day == 'MON' else 0,
         'dayTue': 1 if day == 'TUE' else 0,
         'dayWed': 1 if day == 'WED' else 0,
@@ -71,7 +81,7 @@ def engineer(row):
         'daySat': 1 if day == 'SAT' else 0,
         'distanceMeters':          distance,
         'staticDurationSeconds':   static,
-        'avgFreeFlowSpeed':        round(speed, 3),   # m/s (distanceMeters / staticDurationSeconds)
+        'avgScheduledSpeed':       round(speed, 3),   # m/s proxy for service type (intercity vs. local)
         'weatherTempC':            float(row.get('weatherTempC', 10.0)),
         'weatherPrecipMm':         float(row.get('weatherPrecipMm', 0.0)),
         'weatherWindKph':          float(row.get('weatherWindKph', 15.0)),
@@ -79,11 +89,7 @@ def engineer(row):
         'eventCount':              int(row.get('eventCount', 0)),
         'maxEventCapacity':        int(row.get('maxEventCapacity', 0)),
         'nearestEventKm':          float(row.get('nearestEventKm', 99.0)),
-        'roadworksCount':          int(row.get('roadworksCount', 0)),
-        'roadworksFraction':       float(row.get('roadworksFraction', 0.0)),
         'isHoliday':               int(row.get('isHoliday', 0)),
-        'isWalk':                  1 if row.get('travelMode') == 'WALK'    else 0,
-        'isBicycle':               1 if row.get('travelMode') == 'BICYCLE' else 0,
     }
 
 def segment_key(row):
@@ -208,7 +214,10 @@ def _reason_codes_from_shap(shap_row, col_idx, mid, row):
     """Derive reason codes from per-feature SHAP contributions (in seconds).
     A code is only emitted when the model's attribution for that feature meets
     SHAP_REASON_THRESHOLD -- meaning the feature actually drove the prediction,
-    not just that it was present in the input."""
+    not just that it was present in the input.
+
+    SERVICE_ALERT is not in the feature matrix (the model has no alert signal to
+    learn from) so it is checked directly from the raw input value instead."""
     T = SHAP_REASON_THRESHOLD
     reason_codes = []
 
@@ -235,18 +244,20 @@ def _reason_codes_from_shap(shap_row, col_idx, mid, row):
     if event_contrib >= T:
         reason_codes.append('EVENT')
 
-    if shap_row[col_idx['roadworksCount']] >= T:
-        reason_codes.append('ROADWORKS')
-
     if shap_row[col_idx['isHoliday']] >= T:
         reason_codes.append('HOLIDAY')
 
+    # SERVICE_ALERT: not a model feature -- the model cannot attribute delay to it
+    # via SHAP. Check the raw input value directly so active alerts are always surfaced.
+    if int(row.get('hasServiceAlert', 0)):
+        reason_codes.append('SERVICE_ALERT')
+
     # Fallback: model predicts meaningful delay but no discrete cause was attributed.
-    # The delay signal is coming from time-of-day / day-of-week / corridor features
-    # the model learned -- congestion patterns that aren't captured by discrete inputs.
-    factual_codes = {'RAIN', 'SNOW', 'FOG', 'HIGH_WIND', 'EVENT', 'ROADWORKS', 'HOLIDAY'}
+    # The signal comes from time-of-day / day-of-week / schedule features the model
+    # learned -- overcrowding, knock-on delays, and adherence patterns not in discrete inputs.
+    factual_codes = {'RAIN', 'SNOW', 'FOG', 'HIGH_WIND', 'EVENT', 'HOLIDAY', 'SERVICE_ALERT'}
     if mid > 120 and not any(c in factual_codes for c in reason_codes):
-        reason_codes.append('CORRIDOR_TRAFFIC')
+        reason_codes.append('SCHEDULE_PATTERN')
 
     return reason_codes
 
@@ -287,6 +298,8 @@ def predict_fn(data, model_bundle):
         lo, mid, hi = calibrate_interval(
             float(raw_q10[i]), float(raw_q50[i]), float(raw_q90[i]), row, calibration,
         )
+        # Floor clamp: rail services are timetable-bound and rarely depart early, but we
+        # clamp to prevent unphysical predictions pushing departure advice later than warranted.
         static = int(row['staticDurationSeconds'])
         floor  = calibration.get('floor_fraction', FLOOR_FRACTION) * static - static
         mid    = max(mid, floor)
@@ -319,20 +332,20 @@ def main():
     train_dir = os.environ.get('SM_CHANNEL_TRAIN', '/opt/ml/input/data/train')
     job_name  = os.environ.get('TRAINING_JOB_NAME', 'local')
 
-    print(f"[sageRoadModel.py] job={job_name}", flush=True)
-    print(f"[sageRoadModel.py] train_dir={train_dir}", flush=True)
+    print(f"[sageRailModel.py] job={job_name}", flush=True)
+    print(f"[sageRailModel.py] train_dir={train_dir}", flush=True)
 
     # Load the full 52-week rolling dataset written by sageDataLoader.
     data_file = os.path.join(train_dir, 'train.csv')
-    print("[sageRoadModel.py] Loading data...", flush=True)
+    print("[sageRailModel.py] Loading data...", flush=True)
     all_rows = load_csv(data_file)
-    print(f"[sageRoadModel.py] total rows={len(all_rows):,}", flush=True)
+    print(f"[sageRailModel.py] total rows={len(all_rows):,}", flush=True)
 
     # Internal 80/20 random split. Fixed seed for reproducibility within a run.
     # The rolling window in sageDataLoader ensures the dataset stays bounded and fresh --
     # no need for temporal splitting here; patterns are weekly-cyclical, not trending.
     train_rows, val_rows = train_test_split(all_rows, test_size=0.20, random_state=42)
-    print(f"[sageRoadModel.py] split: train={len(train_rows):,}  val={len(val_rows):,}", flush=True)
+    print(f"[sageRailModel.py] split: train={len(train_rows):,}  val={len(val_rows):,}", flush=True)
 
     sample = train_rows[0]
     feature_cols = list(engineer(sample).keys())
@@ -349,14 +362,14 @@ def main():
         'q90':  HistGradientBoostingRegressor(loss='quantile', quantile=0.90, random_state=42, **COMMON),
     }
 
-    print("[sageRoadModel.py] Training 3 models (q10, q50, q90)...", flush=True)
+    print("[sageRailModel.py] Training 3 models (q10, q50, q90)...", flush=True)
     for name, m in models.items():
         m.fit(X_train, y_train, sample_weight=w_train)
         print(f"  {name} done", flush=True)
 
     pred_val_q50 = models['q50'].predict(X_val)
 
-    print("[sageRoadModel.py] Computing calibration on val set...", flush=True)
+    print("[sageRailModel.py] Computing calibration on val set...", flush=True)
     cal, g_slope, g_intercept = build_calibration(val_rows, pred_val_q50)
     print(f"  {len(cal)} segment fits | global slope={g_slope:.3f} intercept={g_intercept:.1f}", flush=True)
 
@@ -368,7 +381,6 @@ def main():
     }
 
     # Evaluate calibrated predictions on val -- these are the gate metrics.
-    # Val rows are held out from training so this is an honest estimate of generalisation.
     preds_q10 = models['q10'].predict(X_val)
     preds_q50 = models['q50'].predict(X_val)
     preds_q90 = models['q90'].predict(X_val)
@@ -397,7 +409,7 @@ def main():
     gate_bias = 200.0
     gate_pass = cal_rmse <= gate_rmse and abs(cal_bias) <= gate_bias
 
-    print(f"[sageRoadModel.py] Val evaluation:", flush=True)
+    print(f"[sageRailModel.py] Val evaluation:", flush=True)
     print(f"  RMSE={cal_rmse:.1f}s  bias={cal_bias:.1f}s  MAE={cal_mae:.1f}s  within300={within_300:.1%}  CI_cov={ci_cov:.1%}  gate={'PASS' if gate_pass else 'FAIL'}", flush=True)
 
     evaluation = {
@@ -425,7 +437,7 @@ def main():
             Body=json.dumps(evaluation),
             ContentType='application/json',
         )
-        print(f"[sageRoadModel.py] Wrote evaluation to s3://{args.eval_bucket}/{eval_key}", flush=True)
+        print(f"[sageRailModel.py] Wrote evaluation to s3://{args.eval_bucket}/{eval_key}", flush=True)
 
     # ─── Save artefacts to model dir ──────────────────────────────────────────
 
@@ -442,7 +454,7 @@ def main():
     for name, m in models.items():
         out = os.path.join(model_dir, f'model_{name}.joblib')
         joblib.dump(m, out)
-        print(f"[sageRoadModel.py] Saved {out}", flush=True)
+        print(f"[sageRailModel.py] Saved {out}", flush=True)
 
     with open(os.path.join(model_dir, 'calibration.json'), 'w') as fh:
         json.dump(calibration, fh)
@@ -453,16 +465,13 @@ def main():
     with open(os.path.join(model_dir, 'evaluation.json'), 'w') as fh:
         json.dump(evaluation, fh)
 
-    print(f"[sageRoadModel.py] Done. gate={'PASS' if gate_pass else 'FAIL'}", flush=True)
+    print(f"[sageRailModel.py] Done. gate={'PASS' if gate_pass else 'FAIL'}", flush=True)
 
     # TODO: drift monitor
-    # A future sageMonitor Lambda should load the last 7 days of real Dagon rows,
-    # invoke the live endpoint in batches, and compare calibrated predictions to actuals.
-    # Appropriate drift thresholds: RMSE > 700s or |bias| > 300s (softer than the gate
-    # to account for variance between training-val distribution and live production data).
-    # On breach, the monitor triggers the Sage pipeline Step Functions for an early retrain.
-    # The monitor runs nightly via EventBridge after dagonConsolidator (~18:45 UTC) and
-    # the weekly Sunday pipeline run acts as a baseline regardless of drift.
+    # Same approach as sageRoadModel -- a future sageMonitor Lambda should compare
+    # live endpoint predictions against recent Dagon rail actuals nightly.
+    # Appropriate drift thresholds: RMSE > 700s or |bias| > 300s.
+    # On breach, trigger the Sage pipeline Step Functions for an early retrain.
 
     sys.exit(0)
 
