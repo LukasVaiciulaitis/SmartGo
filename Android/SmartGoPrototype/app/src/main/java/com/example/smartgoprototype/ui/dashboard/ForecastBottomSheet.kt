@@ -25,7 +25,7 @@ import java.time.DayOfWeek
 import java.time.LocalDate
 
 internal val CHART_COLORS = listOf(
-    Color(0xFF4CAF50), // Green
+    Color(0xFF0FA253), // Green
     Color(0xFFFFC107), // Amber
     Color(0xFF29B6F6), // Light Blue
     Color(0xFFFF7043), // Deep Orange
@@ -33,8 +33,8 @@ internal val CHART_COLORS = listOf(
 )
 
 private val DAY_CODE_TO_LABEL = mapOf(
-    "MON" to "M", "TUE" to "T", "WED" to "W", "THU" to "T",
-    "FRI" to "F", "SAT" to "S", "SUN" to "S"
+    "MON" to "M", "TUE" to "Tu", "WED" to "W", "THU" to "Th",
+    "FRI" to "F", "SAT" to "Sa", "SUN" to "Su"
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -105,6 +105,12 @@ fun ForecastSheet(
             )
             Spacer(Modifier.height(12.dp))
             ForecastLegend(chartRoutes = chartRoutes)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "Showing top 5 active routes \u2022 Hold & drag routes to reorder",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

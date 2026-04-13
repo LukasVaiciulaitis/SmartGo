@@ -4,6 +4,7 @@ import com.example.smartgoprototype.data.local.dao.RouteDao
 import com.example.smartgoprototype.data.local.entity.RouteEntity
 import com.example.smartgoprototype.data.local.entity.toActiveDaysJson
 import com.example.smartgoprototype.data.local.entity.toDomain
+import com.example.smartgoprototype.data.local.entity.toDomainForecastStatus
 import com.example.smartgoprototype.data.local.entity.toEntity
 import com.example.smartgoprototype.data.remote.api.RoutesApi
 import com.example.smartgoprototype.data.remote.dto.CreateRouteRequest
@@ -235,12 +236,6 @@ class RouteRepositoryImpl @Inject constructor(
     private fun String?.toDomainTravelMode(): TravelMode? =
         TravelMode.entries.find { it.name == this }
 
-    private fun String?.toDomainForecastStatus(): ForecastStatus = when (this) {
-        "active" -> ForecastStatus.ACTIVE
-        "pending" -> ForecastStatus.PENDING
-        else -> ForecastStatus.EMPTY
-    }
-
     private fun com.example.smartgoprototype.data.remote.dto.CreatedScheduleDto?.toDomainScheduleOrNull(): RouteSchedule? {
         val schedule = this ?: return null
         return RouteSchedule(
@@ -341,9 +336,9 @@ class RouteRepositoryImpl @Inject constructor(
 
         return when (code) {
             400 -> "Invalid request."
-            401 -> "Unauthorised - please sign in again."
-            422 -> "Route could not be processed"
-            500 -> "Internal Server error. Please try again."
+            401 -> "Unauthorized. Please sign in again."
+            422 -> "Route could not be processed."
+            500 -> "Internal server error. Please try again."
             503 -> "Routing service temporarily unavailable. Please try again."
             else -> "Request failed with HTTP $code."
         }

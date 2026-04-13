@@ -29,7 +29,7 @@ fun String.toDomainDays(): Set<DayOfWeek> =
 fun Set<DayOfWeek>.toActiveDaysJson(): String =
     DAY_ORDER.filter { contains(it) }.joinToString(",") { it.name.take(3) }
 
-private fun String?.toDomainForecastStatus(): ForecastStatus = when (this) {
+internal fun String?.toDomainForecastStatus(): ForecastStatus = when (this) {
     "active" -> ForecastStatus.ACTIVE
     "pending" -> ForecastStatus.PENDING
     else -> ForecastStatus.EMPTY

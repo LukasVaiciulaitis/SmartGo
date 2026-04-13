@@ -15,18 +15,18 @@ class CognitoAuthRepository @Inject constructor(
 ) : AuthRepository {
 
     override suspend fun login(identifier: String, password: String): Result<Unit> {
-        return suspendCancellableCoroutine { cont ->
+        val result = suspendCancellableCoroutine<Result<Unit>> { cont ->
             Amplify.Auth.signIn(
                 identifier,
                 password,
-                { result ->
-                    if (result.isSignedIn) {
+                { signInResult ->
+                    if (signInResult.isSignedIn) {
                         cont.resume(Result.success(Unit))
                     } else {
                         // Cognito may require additional steps (MFA, password reset, etc.).
                         cont.resume(
                             Result.failure(
-                                IllegalStateException("Sign-in not complete: ${result.nextStep.signInStep}")
+                                IllegalStateException("Sign-in not complete: ${signInResult.nextStep.signInStep}")
                             )
                         )
                     }
@@ -37,6 +37,10 @@ class CognitoAuthRepository @Inject constructor(
                 }
             )
         }
+        // Warm the token cache immediately after sign-in so the interceptor's runBlocking
+        // fallback is never reached on the first batch of API calls.
+        if (result.isSuccess) sessionProvider.getIdToken()
+        return result
     }
 
     override suspend fun register(email: String, password: String): Result<Unit> {

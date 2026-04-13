@@ -18,6 +18,7 @@ import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.font.FontWeight
@@ -337,12 +338,12 @@ private fun DaysRow(
 ) {
     val orderedDays = listOf(
         DayOfWeek.MONDAY to "M",
-        DayOfWeek.TUESDAY to "T",
+        DayOfWeek.TUESDAY to "Tu",
         DayOfWeek.WEDNESDAY to "W",
-        DayOfWeek.THURSDAY to "T",
+        DayOfWeek.THURSDAY to "Th",
         DayOfWeek.FRIDAY to "F",
-        DayOfWeek.SATURDAY to "S",
-        DayOfWeek.SUNDAY to "S"
+        DayOfWeek.SATURDAY to "Sa",
+        DayOfWeek.SUNDAY to "Su"
     )
 
     Row(
@@ -355,12 +356,12 @@ private fun DaysRow(
                 modifier = Modifier.clickable(enabled = enabled) { onToggle(day) },
                 shape = MaterialTheme.shapes.small,
                 color = if (isActive) {
-                    MaterialTheme.colorScheme.primary
+                    Color(0xFF0FA253)
                 } else {
                     MaterialTheme.colorScheme.surfaceVariant
                 },
                 contentColor = if (isActive) {
-                    MaterialTheme.colorScheme.onPrimary
+                    Color(0xFFFFFFFF)
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 }

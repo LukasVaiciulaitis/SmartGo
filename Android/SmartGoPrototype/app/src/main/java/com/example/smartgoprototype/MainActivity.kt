@@ -2,7 +2,6 @@ package com.example.smartgoprototype
 
 import android.net.Uri
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
@@ -10,16 +9,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import com.amplifyframework.core.Amplify
 import com.example.smartgoprototype.ui.addroute.AddRouteRoute
 import com.example.smartgoprototype.ui.editroute.EditRouteRoute
 import com.example.smartgoprototype.ui.dashboard.DashboardRoute
@@ -28,8 +28,6 @@ import com.example.smartgoprototype.ui.register.RegisterRoute
 import com.example.smartgoprototype.ui.theme.SmartGoPrototypeTheme
 import com.example.smartgoprototype.ui.register.ConfirmSignUpRoute
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 
 /**
  * Single-activity entry point for the app.
@@ -169,46 +167,26 @@ fun SmartGoAppNavHost(
 }
 
 /**
- * SplashRoute: checks existing auth session and routes to
- * Dashboard or Login accordingly.
+ * SplashRoute: checks existing auth session and routes to Dashboard or Login accordingly.
  *
- * - Amplify's `fetchAuthSession` is callback-based. It is invoked once in `LaunchedEffect(Unit)`
- *   to avoid re-running on every recomposition.
- * - Navigation is dispatched onto the Main thread.
+ * Delegates to [SplashViewModel], which calls [SessionProvider.getIdToken]. This serves
+ * two purposes: determining sign-in state, and warming the token cache before the
+ * Dashboard fires its first batch of API requests.
  */
 @Composable
 fun SplashRoute(
-    navController: NavHostController
+    navController: NavHostController,
+    viewModel: SplashViewModel = hiltViewModel()
 ) {
-    val scope = rememberCoroutineScope()
+    val destination by viewModel.destination.collectAsState()
 
-    LaunchedEffect(Unit) {
-        Amplify.Auth.fetchAuthSession(
-            { result ->
-                scope.launch(Dispatchers.Main) {
-                    val dest = if (result.isSignedIn) {
-                        Routes.DASHBOARD
-                    } else {
-                        Routes.LOGIN
-                    }
-
-                    navController.navigate(dest) {
-                        popUpTo(Routes.SPLASH) { inclusive = true }
-                    }
-                }
-            },
-            { error ->
-                Log.e("SmartGoApp", "fetchAuthSession failed", error)
-                scope.launch(Dispatchers.Main) {
-                    navController.navigate(Routes.LOGIN) {
-                        popUpTo(Routes.SPLASH) { inclusive = true }
-                    }
-                }
-            }
-        )
+    LaunchedEffect(destination) {
+        val dest = destination ?: return@LaunchedEffect
+        navController.navigate(dest) {
+            popUpTo(Routes.SPLASH) { inclusive = true }
+        }
     }
 
-    // Basic splash screen loading indicator
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center

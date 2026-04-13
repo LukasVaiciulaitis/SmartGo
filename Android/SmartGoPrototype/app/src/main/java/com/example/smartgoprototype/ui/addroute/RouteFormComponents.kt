@@ -34,12 +34,12 @@ import java.time.DayOfWeek
 
 private val DAY_LABELS = mapOf(
     DayOfWeek.MONDAY    to "M",
-    DayOfWeek.TUESDAY   to "T",
+    DayOfWeek.TUESDAY   to "Tu",
     DayOfWeek.WEDNESDAY to "W",
-    DayOfWeek.THURSDAY  to "T",
+    DayOfWeek.THURSDAY  to "Th",
     DayOfWeek.FRIDAY    to "F",
-    DayOfWeek.SATURDAY  to "S",
-    DayOfWeek.SUNDAY    to "S"
+    DayOfWeek.SATURDAY  to "Sa",
+    DayOfWeek.SUNDAY    to "Su"
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
