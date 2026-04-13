@@ -939,7 +939,7 @@ exports.handler = async (event) => {
             const stepDelays      = stepDelaysPerRoute[routeIdx][dayOfWeek];
             const mlReasonCodes   = [...stepReasonCodesPerRoute[routeIdx][dayOfWeek]];
             const totalDeltaSecs  = [...stepDelays.values()].reduce((s, v) => s + v, 0);
-            const extraBufferMins = Math.max(0, Math.round(totalDeltaSecs / 60));
+            const extraBufferMins = Math.round(totalDeltaSecs / 60);
 
             const [arriveHour, arriveMin] = arriveByUtc.split(':').map(Number);
             const arriveByMins = arriveHour * 60 + arriveMin;
@@ -996,7 +996,7 @@ exports.handler = async (event) => {
                     corridorEvents, corridorRoadworks, transitAlerts, holiday, arriveByUtc } = dayData[dayOfWeek];
 
             const mlResult        = dayResultsPerRoute[routeIdx][dayOfWeek] ?? { trafficDeltaSeconds: 0, lo: null, hi: null, reasonCodes: [] };
-            const extraBufferMins = Math.max(0, Math.round(mlResult.trafficDeltaSeconds / 60));
+            const extraBufferMins = Math.round(mlResult.trafficDeltaSeconds / 60);
             const mlLo            = mlResult.lo  ?? null;
             const mlHi            = mlResult.hi  ?? null;
             const mlReasonCodes   = mlResult.reasonCodes ?? [];
