@@ -69,7 +69,10 @@ fun EditRouteScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             if (!uiState.isLoading) {
-                Surface(tonalElevation = 2.dp) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 2.dp
+                ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()

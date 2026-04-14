@@ -21,7 +21,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.layout.onSizeChanged
@@ -87,7 +90,7 @@ fun DashboardScreen(
                 title = { Text("My Routes") },
                 actions = { TextButton(onClick = onLogoutClick) { Text("Logout") } }
             )
-        }
+        },
     ) { innerPadding ->
         Box(
             modifier = Modifier
@@ -228,29 +231,28 @@ private fun RoutesList(
     onReorder: (List<Route>) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // Local display list — source of truth for ordering during and after drags.
-    var localRoutes by remember { mutableStateOf(routes) }
+    // orderedIds tracks drag order. Only reset when the set of IDs changes (add/delete).
+    var orderedIds by remember { mutableStateOf(routes.map { it.id }) }
 
-    // Sync incoming routes from the ViewModel:
-    // - Same set of IDs (toggle, edit): preserve local order, update data in place.
-    // - Different set of IDs (add/delete): re-sync fully from Room.
     LaunchedEffect(routes) {
         val incomingIds = routes.map { it.id }.toSet()
-        val localIds = localRoutes.map { it.id }.toSet()
-        localRoutes = if (incomingIds == localIds) {
-            val routeMap = routes.associateBy { it.id }
-            localRoutes.mapNotNull { routeMap[it.id] }
-        } else {
-            routes
+        if (incomingIds != orderedIds.toSet()) {
+            orderedIds = routes.map { it.id }
         }
     }
 
+    // routeMap and displayRoutes recompute synchronously in the same composition frame
+    // when routes data changes (toggle, edit), so there is no async lag causing scroll jumps.
+    val routeMap = remember(routes) { routes.associateBy { it.id } }
+    val displayRoutes = remember(orderedIds, routeMap) { orderedIds.mapNotNull { routeMap[it] } }
+
     val lazyListState = rememberLazyListState()
     val reorderableState = rememberReorderableLazyListState(lazyListState) { from, to ->
-        localRoutes = localRoutes.toMutableList().apply {
+        val newIds = orderedIds.toMutableList().apply {
             add(to.index, removeAt(from.index))
         }
-        onReorder(localRoutes)
+        orderedIds = newIds
+        onReorder(newIds.mapNotNull { routeMap[it] })
     }
 
     LazyColumn(
@@ -258,15 +260,25 @@ private fun RoutesList(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        items(localRoutes, key = { it.id }) { route ->
-            ReorderableItem(reorderableState, key = route.id) { _ ->
+        items(displayRoutes, key = { it.id }) { route ->
+            ReorderableItem(reorderableState, key = route.id) { isDragging ->
+                val haptic = LocalHapticFeedback.current
+                LaunchedEffect(isDragging) {
+                    if (isDragging) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                }
+                val scale by animateFloatAsState(
+                    targetValue = if (isDragging) 1.03f else 1f,
+                    label = "dragScale"
+                )
                 RouteItem(
                     route = route,
                     onEditClick = { onEditRoute(route.id) },
                     onDeleteClick = { onDeleteRoute(route) },
                     onToggleDay = { day -> onToggleDay(route.id, day) },
                     onToggleActive = { onToggleActive(route.id) },
-                    modifier = Modifier.longPressDraggableHandle()
+                    modifier = Modifier
+                        .longPressDraggableHandle()
+                        .graphicsLayer { scaleX = scale; scaleY = scale }
                 )
             }
         }
@@ -292,15 +304,14 @@ private fun RouteItem(
     )
 
     Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .alpha(alpha),
+        modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 4.dp),
+                .padding(horizontal = 14.dp, vertical = 4.dp)
+                .alpha(alpha),
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Row(
