@@ -201,7 +201,10 @@ exports.handler = async (event) => {
     }
 
     // 6. Create endpoint config (serverless)
-    const configName = `smartgo-${modelType}-cfg`;
+    // Config name is job-scoped so each pipeline run creates a fresh config pointing at
+    // the new model. A static name would hit ResourceInUseException (silently skipped)
+    // and UpdateEndpoint would then reject "cannot update with currently in-use config".
+    const configName = `smartgo-${modelType}-cfg-${jobName}`;
     try {
       await sm.send(new CreateEndpointConfigCommand({
         EndpointConfigName: configName,

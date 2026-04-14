@@ -906,11 +906,20 @@ exports.handler = async (event) => {
       Object.fromEntries(ref.daysOfWeek.map(d => [d, new Set()])));
     const dayResultsPerRoute      = validRoutes.map(({ ref }) =>
       Object.fromEntries(ref.daysOfWeek.map(d => [d, null])));
+    // Per-step lo/hi (seconds) for TRANSIT routes — used to derive a combined CI.
+    // Stored as null when the SM call failed (catch block) so the combined CI can be
+    // omitted rather than summing incomplete data.
+    const stepLosPerRoute = validRoutes.map(({ ref }) =>
+      Object.fromEntries(ref.daysOfWeek.map(d => [d, new Map()])));
+    const stepHisPerRoute = validRoutes.map(({ ref }) =>
+      Object.fromEntries(ref.daysOfWeek.map(d => [d, new Map()])));
 
     allRoadResults.forEach((result, j) => {
       const { routeIdx, stepIndex, dayOfWeek } = chunkRoadKeys[j];
       if (stepIndex !== null) {
         stepDelaysPerRoute[routeIdx][dayOfWeek].set(stepIndex, result.trafficDeltaSeconds ?? 0);
+        stepLosPerRoute[routeIdx][dayOfWeek].set(stepIndex, result.lo ?? null);
+        stepHisPerRoute[routeIdx][dayOfWeek].set(stepIndex, result.hi ?? null);
         for (const code of (result.reasonCodes ?? [])) stepReasonCodesPerRoute[routeIdx][dayOfWeek].add(code);
       } else {
         dayResultsPerRoute[routeIdx][dayOfWeek] = result;
@@ -919,6 +928,8 @@ exports.handler = async (event) => {
     allRailResults.forEach((result, j) => {
       const { routeIdx, stepIndex, dayOfWeek } = chunkRailKeys[j];
       stepDelaysPerRoute[routeIdx][dayOfWeek].set(stepIndex, result.trafficDeltaSeconds ?? 0);
+      stepLosPerRoute[routeIdx][dayOfWeek].set(stepIndex, result.lo ?? null);
+      stepHisPerRoute[routeIdx][dayOfWeek].set(stepIndex, result.hi ?? null);
       for (const code of (result.reasonCodes ?? [])) stepReasonCodesPerRoute[routeIdx][dayOfWeek].add(code);
     });
 
@@ -940,6 +951,18 @@ exports.handler = async (event) => {
             const mlReasonCodes   = [...stepReasonCodesPerRoute[routeIdx][dayOfWeek]];
             const totalDeltaSecs  = [...stepDelays.values()].reduce((s, v) => s + v, 0);
             const extraBufferMins = Math.round(totalDeltaSecs / 60);
+
+            // Combined CI: sum per-step lo/hi (seconds). Summing quantiles assumes perfect
+            // positive correlation across legs — wider than the true interval under independence,
+            // but conservative and consistent with how extraBufferMins is derived. Null when any
+            // step is missing lo/hi (SM failure), since a partial sum would be misleading.
+            const stepLoVals = [...stepLosPerRoute[routeIdx][dayOfWeek].values()];
+            const stepHiVals = [...stepHisPerRoute[routeIdx][dayOfWeek].values()];
+            const allHaveCi  = stepDelays.size > 0
+              && stepLoVals.length === stepDelays.size && stepLoVals.every(v => v !== null)
+              && stepHiVals.length === stepDelays.size && stepHiVals.every(v => v !== null);
+            const mlLo = allHaveCi ? stepLoVals.reduce((s, v) => s + v, 0) : null;
+            const mlHi = allHaveCi ? stepHiVals.reduce((s, v) => s + v, 0) : null;
 
             const [arriveHour, arriveMin] = arriveByUtc.split(':').map(Number);
             const arriveByMins = arriveHour * 60 + arriveMin;
@@ -977,7 +1000,7 @@ exports.handler = async (event) => {
 
             days[dayOfWeek] = {
               forecastDate: dateStr,
-              recommendation: { adjustedDepartBy, extraBufferMins, reasoning, mlLo: null, mlHi: null },
+              recommendation: { adjustedDepartBy, extraBufferMins, reasoning, mlLo, mlHi },
               hasWeatherData:   hourly.length > 0,
               hasEventData:     allEvents.length > 0,
               hasRoadworksData: allRoadworks !== null,
