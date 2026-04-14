@@ -460,7 +460,7 @@ const buildRoadFeatures = (step, route, ref, hourly, corridorEvents, corridorRoa
   const localArrMins = localArrH * 60 + localArrM;
   const localDepMins = ((localArrMins - staticDurationMins) % 1440 + 1440) % 1440;
   const localDepH = Math.floor(localDepMins / 60);
-  const localDepM = localDepMins % 60;
+  const localDepM = Math.floor(localDepMins % 60);
   const departureTimeLocal = `${String(localDepH).padStart(2, '0')}:${String(localDepM).padStart(2, '0')}`;
 
   const legType = localArrH >= 5 && localArrH <= 11 ? 'morningCommute' : 'eveningReturn';
@@ -531,7 +531,7 @@ const buildRailFeatures = (step, route, ref, hourly, corridorEvents, transitAler
   const localArrMins = localArrH * 60 + localArrM;
   const localDepMins = ((localArrMins - staticDurationMins) % 1440 + 1440) % 1440;
   const localDepH = Math.floor(localDepMins / 60);
-  const localDepM = localDepMins % 60;
+  const localDepM = Math.floor(localDepMins % 60);
   const departureTimeLocal = `${String(localDepH).padStart(2, '0')}:${String(localDepM).padStart(2, '0')}`;
 
   const legType = localArrH >= 5 && localArrH <= 11 ? 'morningCommute' : 'eveningReturn';
