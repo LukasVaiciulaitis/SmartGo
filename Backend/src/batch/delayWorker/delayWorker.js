@@ -595,8 +595,11 @@ const snapToScheduledDeparture = (departures, targetMins) => {
   return best;
 };
 
-// Walk backwards through route steps, subtracting each step's effective duration
-// (staticDuration + SageMaker-predicted delay) from the current target arrival.
+// Minutes of buffer subtracted from requiredDeparture before timetable snapping.
+// Absorbs ML prediction error at each connection — if the model is slightly wrong
+// about how long a leg takes, this margin prevents missing the next service.
+const TRANSFER_BUFFER_MINS = 2;
+
 // For TRANSIT steps with a timetable, snaps to the latest real departure that fits.
 // A snapped departure earlier than the arithmetic required time cascades backwards —
 // the preceding step must finish earlier to make the connection.
@@ -605,10 +608,13 @@ const snapToScheduledDeparture = (departures, targetMins) => {
 // timetableCache: { [typeDate]: { schedule: { MON: ['HH:MM', ...], ... } } }
 // dayOfWeek:      e.g. 'MON'
 // arriveByMins:   arriveBy in total minutes from midnight (UTC)
-// stepDelays:     Map<stepIndex, delaySeconds> from SageMaker predictions
+// stepDelays:     Map<stepIndex, delaySeconds> — q50 median predictions from SageMaker
+// stepHis:        Map<stepIndex, delaySeconds> — q90 pessimistic predictions from SageMaker
+//                 Used for snapping decisions so connections hold under worse-than-median conditions.
+//                 Falls back to stepDelays when hi is unavailable (SM partial failure).
 //
 // Returns { departMins, cascadeReasons }
-const simulateCascadeBackwards = (steps, timetableCache, dayOfWeek, arriveByMins, stepDelays) => {
+const simulateCascadeBackwards = (steps, timetableCache, dayOfWeek, arriveByMins, stepDelays, stepHis) => {
   const cascadeReasons = [];
   let currentTarget = arriveByMins;
 
@@ -617,14 +623,20 @@ const simulateCascadeBackwards = (steps, timetableCache, dayOfWeek, arriveByMins
     const stepMins = parseDurationToMinutes(step.staticDuration);
     if (stepMins === null) continue; // pre-Phase 2 route — no per-step duration stored
 
-    const stepDelayMins = Math.round((stepDelays.get(i) ?? 0) / 60);
-    const effectiveMins = stepMins + stepDelayMins;
+    // Use q90 (pessimistic) delay for snapping decisions so connections are reliable
+    // under worse-than-median conditions. Fall back to q50 when hi is unavailable.
+    const hiSecs        = stepHis?.get(i);
+    const snapDelaySecs = (hiSecs != null) ? hiSecs : (stepDelays.get(i) ?? 0);
+    const snapDelayMins = Math.round(snapDelaySecs / 60);
+    const effectiveMins = stepMins + snapDelayMins;
 
     if (step.travelMode === 'WALK') {
       currentTarget -= effectiveMins;
 
     } else if (step.travelMode === 'TRANSIT' && step.startLocation?.latLng) {
-      const requiredDeparture = currentTarget - effectiveMins;
+      // Subtract TRANSFER_BUFFER_MINS before snapping so the cascade recommends a
+      // service that departs with margin to spare — absorbs ML error at each connection.
+      const requiredDeparture = currentTarget - effectiveMins - TRANSFER_BUFFER_MINS;
       const lineShortName     = step.transitDetails?.transitLine?.nameShort;
 
       if (lineShortName) {
@@ -964,18 +976,26 @@ exports.handler = async (event) => {
             const mlLo = allHaveCi ? stepLoVals.reduce((s, v) => s + v, 0) : null;
             const mlHi = allHaveCi ? stepHiVals.reduce((s, v) => s + v, 0) : null;
 
-            const [arriveHour, arriveMin] = arriveByUtc.split(':').map(Number);
-            const arriveByMins = arriveHour * 60 + arriveMin;
+            // Cascade runs in LOCAL time — timetable departure strings from GTFS are local,
+            // so all arithmetic must stay in the same frame and be converted to UTC at the end.
+            const [localArrH, localArrM] = ref.arriveBy.split(':').map(Number);
+            const arriveByLocalMins = localArrH * 60 + localArrM;
+
+            const [utcArrH, utcArrM] = arriveByUtc.split(':').map(Number);
+            const utcOffsetMins = arriveByLocalMins - (utcArrH * 60 + utcArrM); // e.g. +60 for BST
 
             // Run timetable cascade inline — snaps to real scheduled departures and propagates
             // connection constraints backwards. Falls back gracefully per step when no timetable
             // data exists (new lines, data not yet populated). No separate Lambda needed.
-            const { departMins, cascadeReasons } = simulateCascadeBackwards(
-              route.steps, timetableCache, dayOfWeek, arriveByMins, stepDelays
+            const { departMins: departMinsLocal, cascadeReasons } = simulateCascadeBackwards(
+              route.steps, timetableCache, dayOfWeek, arriveByLocalMins,
+              stepDelays, stepHisPerRoute[routeIdx][dayOfWeek]
             );
+            // Convert local departure back to UTC for storage
+            const departMinsUtc = ((departMinsLocal - utcOffsetMins) % 1440 + 1440) % 1440;
 
             const base             = new Date(`${dateStr}T00:00:00Z`);
-            const adjustedDepartBy = new Date(base.getTime() + departMins * 60_000)
+            const adjustedDepartBy = new Date(base.getTime() + departMinsUtc * 60_000)
               .toISOString().replace(/\.\d{3}Z$/, 'Z');
 
             const reasonParts = buildReasoningFromCodes(
@@ -992,10 +1012,12 @@ exports.handler = async (event) => {
               ? reasonParts.join('. ')
               : 'Normal conditions — no disruptions expected.';
 
-            // Append timetable connection reasons (e.g. "Catch the 08:10 X service")
+            // Append timetable connection reasons in journey order (cascade builds them backwards).
+            // e.g. "Catch the 06:55 X27 service. Catch the 07:28 C3 service. Catch the 07:44 23 service."
             if (cascadeReasons.length > 0) {
+              const ordered = [...cascadeReasons].reverse();
               const base = reasoning === 'Normal conditions — no disruptions expected.' ? '' : reasoning;
-              reasoning  = base ? `${base}. ${cascadeReasons.join('. ')}` : cascadeReasons.join('. ');
+              reasoning  = base ? `${base}. ${ordered.join('. ')}` : ordered.join('. ');
             }
 
             days[dayOfWeek] = {
