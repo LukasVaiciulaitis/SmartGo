@@ -17,6 +17,9 @@ const {
   CreateEndpointCommand,
   UpdateEndpointCommand,
   DescribeEndpointCommand,
+  DescribeEndpointConfigCommand,
+  DeleteModelCommand,
+  DeleteEndpointConfigCommand,
 } = require('@aws-sdk/client-sagemaker');
 
 const sm = new SageMakerClient({});
@@ -158,81 +161,75 @@ exports.handler = async (event) => {
       );
     }
 
-    // 5. Create versioned SageMaker model
-    // model.tar.gz contains the model script (copied by the script itself during training)
-    // so SAGEMAKER_PROGRAM points directly to the combined training/serving script.
-    //
-    // Model and config names are fixed (smartgo-{modelType}, smartgo-{modelType}-cfg) rather
-    // than per-run UUIDs. This is intentional -- SmartGo has exactly two endpoints (road, rail)
-    // and never runs overlapping pipeline executions. The weekly EventBridge schedule ensures
-    // runs are sequential; concurrent executions are an architectural non-issue here.
-    // NOTE: The ResourceInUseException guard below handles Lambda retries within a single run,
-    // but would not protect against true concurrent runs. If concurrency ever becomes a
-    // requirement, switch back to UUID-suffixed names and use DeleteModel/DeleteEndpointConfig
-    // to clean up old versions after a successful UpdateEndpoint.
+    // 5. Read old config/model names from the live endpoint so we can delete them after
+    // the update. Both model and config are job-scoped (suffixed with jobName) so each
+    // run creates fresh resources pointing at the new artifact. The old pair is deleted
+    // after UpdateEndpoint accepts the new config -- at that point they are detached and
+    // SageMaker allows deletion. Failures here are non-fatal; orphaned configs/models
+    // are harmless (no billing for unused SageMaker configs or models) and will be
+    // cleaned up on the next successful pipeline run.
     console.log(`sageWorker gate passed -- deploying modelType="${modelType}" artifact="${modelArtifact}"`);
-    const modelName = `smartgo-${modelType}`;
-    try {
-      await sm.send(new CreateModelCommand({
-        ModelName:        modelName,
-        PrimaryContainer: {
-          Image:        TRAINING_IMAGE,
-          ModelDataUrl: modelArtifact,
-          Environment: {
-            SAGEMAKER_PROGRAM:             config.sagemakerProgram,
-            SAGEMAKER_SUBMIT_DIRECTORY:    '/opt/ml/model',
-            SAGEMAKER_CONTAINER_LOG_LEVEL: '20',
-          },
-        },
-        ExecutionRoleArn: SAGEMAKER_ROLE,
-        Tags: [
-          { Key: 'Project',     Value: 'SmartGo' },
-          { Key: 'ModelType',   Value: modelType },
-          { Key: 'TrainingJob', Value: jobName },
-        ],
-      }));
-      console.log(`Created SageMaker model: ${modelName}`);
-    } catch (err) {
-      if (err.name === 'ResourceInUseException' || err.message?.includes('already exists') || err.message?.includes('already existing')) {
-        console.log(`SageMaker model ${modelName} already exists -- Lambda retry, continuing`);
-      } else {
-        throw err;
-      }
-    }
-
-    // 6. Create endpoint config (serverless)
-    // Config name is job-scoped so each pipeline run creates a fresh config pointing at
-    // the new model. A static name would hit ResourceInUseException (silently skipped)
-    // and UpdateEndpoint would then reject "cannot update with currently in-use config".
-    const configName = `smartgo-${modelType}-cfg-${jobName}`;
-    try {
-      await sm.send(new CreateEndpointConfigCommand({
-        EndpointConfigName: configName,
-        ProductionVariants: [{
-          VariantName:  'AllTraffic',
-          ModelName:    modelName,
-          ServerlessConfig: {
-            MemorySizeInMB: 2048,
-            MaxConcurrency: 10,
-          },
-        }],
-        Tags: [
-          { Key: 'Project',   Value: 'SmartGo' },
-          { Key: 'ModelType', Value: modelType },
-        ],
-      }));
-      console.log(`Created endpoint config: ${configName}`);
-    } catch (err) {
-      if (err.name === 'ResourceInUseException' || err.message?.includes('already exists') || err.message?.includes('already existing')) {
-        console.log(`Endpoint config ${configName} already exists -- Lambda retry, continuing`);
-      } else {
-        throw err;
-      }
-    }
-
-    // 7. Create or update the fixed-name endpoint for this model type
     const { endpointName } = config;
     const exists = await endpointExists(endpointName);
+
+    let oldConfigName = null;
+    let oldModelName  = null;
+    if (exists) {
+      try {
+        const endpointDesc = await sm.send(new DescribeEndpointCommand({ EndpointName: endpointName }));
+        oldConfigName = endpointDesc.EndpointConfigName ?? null;
+        if (oldConfigName) {
+          const configDesc = await sm.send(new DescribeEndpointConfigCommand({ EndpointConfigName: oldConfigName }));
+          oldModelName = configDesc.ProductionVariants?.[0]?.ModelName ?? null;
+        }
+        console.log(`Captured old resources for cleanup: config=${oldConfigName} model=${oldModelName}`);
+      } catch (err) {
+        console.warn(`Could not read old endpoint resources for cleanup -- non-fatal: ${err.message}`);
+      }
+    }
+
+    // 6. Create new job-scoped model and endpoint config
+    const modelName  = `smartgo-${modelType}-${jobName}`;
+    const configName = `smartgo-${modelType}-cfg-${jobName}`;
+
+    await sm.send(new CreateModelCommand({
+      ModelName:        modelName,
+      PrimaryContainer: {
+        Image:        TRAINING_IMAGE,
+        ModelDataUrl: modelArtifact,
+        Environment: {
+          SAGEMAKER_PROGRAM:             config.sagemakerProgram,
+          SAGEMAKER_SUBMIT_DIRECTORY:    '/opt/ml/model',
+          SAGEMAKER_CONTAINER_LOG_LEVEL: '20',
+        },
+      },
+      ExecutionRoleArn: SAGEMAKER_ROLE,
+      Tags: [
+        { Key: 'Project',     Value: 'SmartGo' },
+        { Key: 'ModelType',   Value: modelType },
+        { Key: 'TrainingJob', Value: jobName },
+      ],
+    }));
+    console.log(`Created SageMaker model: ${modelName}`);
+
+    await sm.send(new CreateEndpointConfigCommand({
+      EndpointConfigName: configName,
+      ProductionVariants: [{
+        VariantName:  'AllTraffic',
+        ModelName:    modelName,
+        ServerlessConfig: {
+          MemorySizeInMB: 2048,
+          MaxConcurrency: 10,
+        },
+      }],
+      Tags: [
+        { Key: 'Project',   Value: 'SmartGo' },
+        { Key: 'ModelType', Value: modelType },
+      ],
+    }));
+    console.log(`Created endpoint config: ${configName}`);
+
+    // 7. Create or update the fixed-name endpoint, then clean up old resources
     if (exists) {
       await sm.send(new UpdateEndpointCommand({
         EndpointName:       endpointName,
@@ -249,6 +246,26 @@ exports.handler = async (event) => {
         ],
       }));
       console.log(`Created endpoint: ${endpointName}`);
+    }
+
+    // Delete the previous config and model now that the endpoint has accepted the new config.
+    // Order matters: config must be deleted before model (model deletion fails while any
+    // config still references it).
+    if (oldConfigName && oldConfigName !== configName) {
+      try {
+        await sm.send(new DeleteEndpointConfigCommand({ EndpointConfigName: oldConfigName }));
+        console.log(`Deleted old endpoint config: ${oldConfigName}`);
+      } catch (err) {
+        console.warn(`Could not delete old endpoint config ${oldConfigName} -- non-fatal: ${err.message}`);
+      }
+    }
+    if (oldModelName && oldModelName !== modelName) {
+      try {
+        await sm.send(new DeleteModelCommand({ ModelName: oldModelName }));
+        console.log(`Deleted old model: ${oldModelName}`);
+      } catch (err) {
+        console.warn(`Could not delete old model ${oldModelName} -- non-fatal: ${err.message}`);
+      }
     }
 
     return {
