@@ -13,12 +13,14 @@ import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.pullrefresh.PullRefreshIndicator
 import androidx.compose.material.pullrefresh.pullRefresh
 import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -38,6 +40,8 @@ import java.time.DayOfWeek
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
+import kotlinx.coroutines.delay
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
@@ -54,8 +58,12 @@ fun DashboardScreen(
     onDeleteDismiss: () -> Unit,
     onToggleDay: (routeId: String, day: DayOfWeek) -> Unit,
     onToggleActive: (routeId: String) -> Unit,
-    onReorder: (List<Route>) -> Unit
+    onReorder: (List<Route>) -> Unit,
+    onToggleNotifications: () -> Unit,
+    onToggleGpsTracking: () -> Unit
 ) {
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
     val pullRefreshState = rememberPullRefreshState(
         refreshing = uiState.isRefreshing,
         onRefresh = onRefresh
@@ -84,10 +92,26 @@ fun DashboardScreen(
         )
     }
 
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            SettingsDrawer(
+                notificationsEnabled = uiState.notificationsEnabled,
+                gpsTrackingEnabled = uiState.gpsTrackingEnabled,
+                onToggleNotifications = onToggleNotifications,
+                onToggleGpsTracking = onToggleGpsTracking
+            )
+        }
+    ) {
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text("My Routes") },
+                navigationIcon = {
+                    IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                        Icon(Icons.Default.Menu, contentDescription = "Open settings")
+                    }
+                },
                 actions = { TextButton(onClick = onLogoutClick) { Text("Logout") } }
             )
         },
@@ -129,6 +153,8 @@ fun DashboardScreen(
                 else -> {
                     Column(modifier = Modifier.fillMaxSize()) {
                         Column(modifier = Modifier.onSizeChanged { forecastSectionHeight = it.height }) {
+                            NextDepartureHeader(routes = uiState.routes)
+                            Spacer(Modifier.height(8.dp))
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -184,6 +210,46 @@ fun DashboardScreen(
             )
         }
     }
+    } // ModalNavigationDrawer
+}
+
+@Composable
+private fun SettingsDrawer(
+    notificationsEnabled: Boolean,
+    gpsTrackingEnabled: Boolean,
+    onToggleNotifications: () -> Unit,
+    onToggleGpsTracking: () -> Unit
+) {
+    ModalDrawerSheet {
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = "Preferences",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+        )
+        HorizontalDivider()
+        ListItem(
+            headlineContent = { Text("Toggle notifications") },
+            trailingContent = {
+                Switch(
+                    checked = notificationsEnabled,
+                    onCheckedChange = { onToggleNotifications() }
+                )
+            }
+        )
+        HorizontalDivider()
+        ListItem(
+            headlineContent = { Text("Opt in GPS data") },
+            trailingContent = {
+                Switch(
+                    checked = gpsTrackingEnabled,
+                    onCheckedChange = { onToggleGpsTracking() }
+                )
+            }
+        )
+        HorizontalDivider()
+    }
 }
 
 @Composable
@@ -216,6 +282,91 @@ private fun AddRouteCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface
             )
+        }
+    }
+}
+
+@Composable
+private fun NextDepartureHeader(
+    routes: List<Route>,
+    modifier: Modifier = Modifier
+) {
+    var now by remember { mutableStateOf(Instant.now()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(30_000)
+            now = Instant.now()
+        }
+    }
+
+    data class NextDeparture(val instant: Instant, val routeTitle: String, val reasoning: String)
+
+    val dayKeyMap = mapOf(
+        DayOfWeek.MONDAY    to "MON",
+        DayOfWeek.TUESDAY   to "TUE",
+        DayOfWeek.WEDNESDAY to "WED",
+        DayOfWeek.THURSDAY  to "THU",
+        DayOfWeek.FRIDAY    to "FRI",
+        DayOfWeek.SATURDAY  to "SAT",
+        DayOfWeek.SUNDAY    to "SUN"
+    )
+
+    val next = remember(routes, now) {
+        routes
+            .filter { it.userActive && it.forecast != null }
+            .flatMap { route ->
+                val activeKeys = route.schedule.activeDays.mapNotNull { dayKeyMap[it] }.toSet()
+                route.forecast!!.days
+                    .filterKeys { it in activeKeys }
+                    .values
+                    .mapNotNull { day ->
+                        runCatching { Instant.parse(day.recommendation.adjustedDepartBy) }.getOrNull()
+                            ?.let { instant -> NextDeparture(instant, route.title, day.recommendation.reasoning) }
+                    }
+            }
+            .filter { it.instant.isAfter(now) }
+            .minByOrNull { it.instant }
+    }
+
+    if (next == null) return
+
+    val secondsUntil = ChronoUnit.SECONDS.between(now, next.instant)
+    if (secondsUntil <= 0) return
+
+    val hours = secondsUntil / 3600
+    val minutes = (secondsUntil % 3600) / 60
+    val timeLabel = if (hours > 0) "${hours}h ${minutes}m" else "${minutes}m"
+
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        shape = MaterialTheme.shapes.medium
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Text(
+                text = "Your next departure",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            Text(
+                text = "in $timeLabel",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            Text(
+                text = next.routeTitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+            )
+            if (next.reasoning.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = next.reasoning,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                )
+            }
         }
     }
 }
@@ -362,7 +513,7 @@ private fun RouteItem(
                 Spacer(Modifier.width(10.dp))
                 DaysRow(
                     activeDays = route.schedule.activeDays,
-                    enabled = true,
+                    enabled = route.userActive,
                     onToggle = onToggleDay,
                     modifier = Modifier.weight(1f)
                 )

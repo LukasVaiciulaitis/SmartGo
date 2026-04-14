@@ -8,5 +8,7 @@ data class DashboardUiState(
     val routes: List<Route> = emptyList(),
     val errorMessage: String? = null,
     val pendingDeleteRoute: Route? = null,
-    val isDeletingRoute: Boolean = false
+    val isDeletingRoute: Boolean = false,
+    val notificationsEnabled: Boolean = false,
+    val gpsTrackingEnabled: Boolean = false
 )

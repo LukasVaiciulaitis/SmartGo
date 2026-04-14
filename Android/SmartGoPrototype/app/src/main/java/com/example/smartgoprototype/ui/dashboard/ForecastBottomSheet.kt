@@ -101,13 +101,8 @@ fun ForecastSheet(
             Spacer(Modifier.height(8.dp))
             ForecastLegend(chartRoutes = chartRoutes)
             Spacer(Modifier.height(4.dp))
-            val routeWord = if (chartRoutes.size == 1) "route" else "routes"
-            val countLabel = if (chartRoutes.size < 5)
-                "Showing ${chartRoutes.size} active $routeWord with forecasts"
-            else
-                "Showing top 5 active routes by list order"
             Text(
-                text = "$countLabel \u2022 Hold & drag routes to change chart priority",
+                text = "Showing top 5 active routes \u2022 Hold & drag to reorder",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

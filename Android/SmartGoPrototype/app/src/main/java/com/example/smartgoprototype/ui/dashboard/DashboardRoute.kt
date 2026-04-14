@@ -48,6 +48,8 @@ fun DashboardRoute(
         onDeleteDismiss = viewModel::dismissDeleteConfirmation,
         onToggleDay = viewModel::toggleDay,
         onToggleActive = viewModel::toggleRouteActive,
-        onReorder = viewModel::reorderRoutes
+        onReorder = viewModel::reorderRoutes,
+        onToggleNotifications = viewModel::toggleNotifications,
+        onToggleGpsTracking = viewModel::toggleGpsTracking
     )
 }

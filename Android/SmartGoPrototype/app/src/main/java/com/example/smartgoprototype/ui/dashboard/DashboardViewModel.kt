@@ -93,6 +93,18 @@ class DashboardViewModel @Inject constructor(
         }
     }
 
+    fun toggleNotifications() {
+        _uiState.value = _uiState.value.copy(
+            notificationsEnabled = !_uiState.value.notificationsEnabled
+        )
+    }
+
+    fun toggleGpsTracking() {
+        _uiState.value = _uiState.value.copy(
+            gpsTrackingEnabled = !_uiState.value.gpsTrackingEnabled
+        )
+    }
+
     fun toggleDay(routeId: String, day: DayOfWeek) {
         val route = _uiState.value.routes.find { it.id == routeId } ?: return
         val oldDays = route.schedule.activeDays
