@@ -53,18 +53,13 @@ fun ForecastSheet(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
-            .padding(bottom = 24.dp)
+            .padding(bottom = 12.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "Weekly Forecast",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold
-            )
             SingleChoiceSegmentedButtonRow(modifier = Modifier.height(32.dp)) {
                 SegmentedButton(
                     selected = !showTotal,
@@ -81,13 +76,13 @@ fun ForecastSheet(
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(6.dp))
 
         if (chartRoutes.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(140.dp),
+                    .height(90.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
@@ -103,11 +98,16 @@ fun ForecastSheet(
                 orderedDays = orderedDays,
                 modifier = Modifier.fillMaxWidth()
             )
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
             ForecastLegend(chartRoutes = chartRoutes)
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(4.dp))
+            val routeWord = if (chartRoutes.size == 1) "route" else "routes"
+            val countLabel = if (chartRoutes.size < 5)
+                "Showing ${chartRoutes.size} active $routeWord with forecasts"
+            else
+                "Showing top 5 active routes by list order"
             Text(
-                text = "Showing top 5 active routes \u2022 Hold & drag routes to reorder",
+                text = "$countLabel \u2022 Hold & drag routes to change chart priority",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -150,7 +150,7 @@ private fun ForecastLineChart(
     val textMeasurer = rememberTextMeasurer()
     val surfaceColor = MaterialTheme.colorScheme.surface
 
-    Canvas(modifier = modifier.height(200.dp)) {
+    Canvas(modifier = modifier.height(130.dp)) {
         val labelAreaLeft = 34.dp.toPx()
         val labelAreaBottom = 20.dp.toPx()
         val chartTop = 6.dp.toPx()

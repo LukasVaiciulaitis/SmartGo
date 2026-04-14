@@ -8,6 +8,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DirectionsBike
+import androidx.compose.material.icons.filled.DirectionsBus
+import androidx.compose.material.icons.filled.DirectionsCar
+import androidx.compose.material.icons.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.BasicAlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -112,19 +116,18 @@ internal fun ArriveByTimeInput(state: TimePickerState) {
     }
 }
 
+private val TRAVEL_MODE_ICONS = mapOf(
+    TravelMode.DRIVE   to (Icons.Default.DirectionsCar  to "Drive"),
+    TravelMode.TRANSIT to (Icons.Default.DirectionsBus  to "Transit"),
+    TravelMode.WALK    to (Icons.Default.DirectionsWalk to "Walk"),
+    TravelMode.BICYCLE to (Icons.Default.DirectionsBike to "Bicycle"),
+)
+
 @Composable
 internal fun TravelModePicker(
     selected: TravelMode,
     onSelected: (TravelMode) -> Unit
 ) {
-    val modeLabels = mapOf(
-        TravelMode.DRIVE       to "Drive",
-        TravelMode.TRANSIT     to "Transit",
-        TravelMode.WALK        to "Walk",
-        TravelMode.TWO_WHEELER to "2W",
-        TravelMode.BICYCLE     to "Bike"
-    )
-
     Column(Modifier.fillMaxWidth()) {
         Text("Travel mode", style = MaterialTheme.typography.labelLarge)
         Spacer(Modifier.height(8.dp))
@@ -132,17 +135,17 @@ internal fun TravelModePicker(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            TravelMode.entries.forEach { mode ->
+            TRAVEL_MODE_ICONS.forEach { (mode, iconAndLabel) ->
+                val (icon, label) = iconAndLabel
                 FilterChip(
                     modifier = Modifier.weight(1f),
                     selected = selected == mode,
                     onClick = { onSelected(mode) },
                     label = {
-                        Text(
-                            text = modeLabels[mode] ?: mode.name.replace('_', ' '),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.labelSmall
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = label,
+                            modifier = Modifier.fillMaxWidth()
                         )
                     }
                 )

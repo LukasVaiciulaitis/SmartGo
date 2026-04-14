@@ -24,9 +24,11 @@ fun ConfirmSignUpRoute(
     val uiState = viewModel.uiState
 
     LaunchedEffect(uiState.isSuccess) {
-        if (uiState.isSuccess) {
-            onConfirmSuccess()
-        }
+        if (uiState.isSuccess) onConfirmSuccess()
+    }
+
+    LaunchedEffect(uiState.shouldFallBackToLogin) {
+        if (uiState.shouldFallBackToLogin) onBackToLogin()
     }
 
     ConfirmSignUpScreen(

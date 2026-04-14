@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.smartgoprototype.data.auth.PendingRegistrationCredentials
 import com.example.smartgoprototype.domain.repository.AuthRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
@@ -21,7 +22,8 @@ import javax.inject.Inject
  */
 @HiltViewModel
 class RegisterViewModel @Inject constructor(
-    private val authRepository: AuthRepository
+    private val authRepository: AuthRepository,
+    private val pendingCredentials: PendingRegistrationCredentials
 ) : ViewModel() {
 
     var uiState by mutableStateOf(RegisterUiState())
@@ -82,6 +84,7 @@ class RegisterViewModel @Inject constructor(
 
             uiState = result.fold(
                 onSuccess = {
+                    pendingCredentials.set(email, password)
                     uiState.copy(
                         isLoading = false,
                         generalError = null,

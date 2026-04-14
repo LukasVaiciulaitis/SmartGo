@@ -5,5 +5,6 @@ data class ConfirmSignUpUiState(
     val code: String = "",
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
-    val isSuccess: Boolean = false
+    val isSuccess: Boolean = false,
+    val shouldFallBackToLogin: Boolean = false
 )

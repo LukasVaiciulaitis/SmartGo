@@ -1,5 +1,6 @@
 package com.example.smartgoprototype.ui.dashboard
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -11,6 +12,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.pullrefresh.PullRefreshIndicator
 import androidx.compose.material.pullrefresh.pullRefresh
@@ -21,7 +23,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.example.smartgoprototype.domain.model.ForecastStatus
 import com.example.smartgoprototype.domain.model.Route
@@ -52,6 +57,12 @@ fun DashboardScreen(
         refreshing = uiState.isRefreshing,
         onRefresh = onRefresh
     )
+    var forecastExpanded by remember { mutableStateOf(true) }
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (forecastExpanded) 180f else 0f,
+        label = "forecastChevron"
+    )
+    var forecastSectionHeight by remember { mutableStateOf(0) }
 
     // Delete confirmation dialog
     uiState.pendingDeleteRoute?.let { route ->
@@ -113,16 +124,43 @@ fun DashboardScreen(
                     }
                 }
                 else -> {
-                    RoutesList(
-                        routes = uiState.routes,
-                        onAddRouteClick = onAddRouteClick,
-                        onEditRoute = onEditRoute,
-                        onDeleteRoute = onDeleteRouteRequest,
-                        onToggleDay = onToggleDay,
-                        onToggleActive = onToggleActive,
-                        onReorder = onReorder,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Column(modifier = Modifier.onSizeChanged { forecastSectionHeight = it.height }) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { forecastExpanded = !forecastExpanded }
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Weekly Forecast",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Icon(
+                                    imageVector = Icons.Default.KeyboardArrowDown,
+                                    contentDescription = if (forecastExpanded) "Collapse forecast" else "Expand forecast",
+                                    modifier = Modifier.rotate(chevronRotation)
+                                )
+                            }
+                            AnimatedVisibility(visible = forecastExpanded) {
+                                ForecastSheet(routes = uiState.routes)
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        RoutesList(
+                            routes = uiState.routes,
+                            onAddRouteClick = onAddRouteClick,
+                            onEditRoute = onEditRoute,
+                            onDeleteRoute = onDeleteRouteRequest,
+                            onToggleDay = onToggleDay,
+                            onToggleActive = onToggleActive,
+                            onReorder = onReorder,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
             }
 
@@ -137,7 +175,9 @@ fun DashboardScreen(
             PullRefreshIndicator(
                 refreshing = uiState.isRefreshing,
                 state = pullRefreshState,
-                modifier = Modifier.align(Alignment.TopCenter)
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .offset { IntOffset(0, forecastSectionHeight) }
             )
         }
     }
@@ -233,10 +273,6 @@ private fun RoutesList(
         item(key = "add_route_button") {
             AddRouteCard(onClick = onAddRouteClick)
         }
-        item(key = "forecast_chart") {
-            Spacer(Modifier.height(6.dp))
-            ForecastSheet(routes = routes)
-        }
     }
 }
 
@@ -315,7 +351,7 @@ private fun RouteItem(
                 Spacer(Modifier.width(10.dp))
                 DaysRow(
                     activeDays = route.schedule.activeDays,
-                    enabled = false,
+                    enabled = true,
                     onToggle = onToggleDay,
                     modifier = Modifier.weight(1f)
                 )

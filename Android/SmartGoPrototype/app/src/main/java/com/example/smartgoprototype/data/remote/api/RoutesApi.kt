@@ -5,8 +5,10 @@ import com.example.smartgoprototype.data.remote.dto.CreateRouteResponseDto
 import com.example.smartgoprototype.data.remote.dto.DeleteRouteRequestDto
 import com.example.smartgoprototype.data.remote.dto.DeleteRouteResponseDto
 import com.example.smartgoprototype.data.remote.dto.FetchRoutesResponseDto
-import com.example.smartgoprototype.data.remote.dto.UpdateRouteRequestDto
+import com.example.smartgoprototype.data.remote.dto.EditRouteRequestDto
+import com.example.smartgoprototype.data.remote.dto.ToggleActiveRequestDto
 import com.example.smartgoprototype.data.remote.dto.UpdateRouteResponseDto
+import com.example.smartgoprototype.data.remote.dto.UpdateScheduleRequestDto
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.HTTP
@@ -38,8 +40,18 @@ interface RoutesApi {
     ): CreateRouteResponseDto
 
     @PUT("routes/update")
-    suspend fun updateRoute(
-        @Body request: UpdateRouteRequestDto
+    suspend fun editRoute(
+        @Body request: EditRouteRequestDto
+    ): UpdateRouteResponseDto
+
+    @PUT("routes/update")
+    suspend fun toggleActive(
+        @Body request: ToggleActiveRequestDto
+    ): UpdateRouteResponseDto
+
+    @PUT("routes/update")
+    suspend fun updateSchedule(
+        @Body request: UpdateScheduleRequestDto
     ): UpdateRouteResponseDto
 
     @HTTP(method = "DELETE", path = "routes/delete", hasBody = true)

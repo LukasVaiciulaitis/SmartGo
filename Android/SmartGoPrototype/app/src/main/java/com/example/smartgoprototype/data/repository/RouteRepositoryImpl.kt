@@ -9,13 +9,15 @@ import com.example.smartgoprototype.data.local.entity.toEntity
 import com.example.smartgoprototype.data.remote.api.RoutesApi
 import com.example.smartgoprototype.data.remote.dto.CreateRouteRequest
 import com.example.smartgoprototype.data.remote.dto.DeleteRouteRequestDto
+import com.example.smartgoprototype.data.remote.dto.EditRouteRequestDto
 import com.example.smartgoprototype.data.remote.dto.EndpointPlace
 import com.example.smartgoprototype.data.remote.dto.FetchedRouteDto
 import com.example.smartgoprototype.data.remote.dto.ForecastDto
 import com.example.smartgoprototype.data.remote.dto.GoogleAddressComponentDto
 import com.example.smartgoprototype.data.remote.dto.IntermediatePlace
 import com.example.smartgoprototype.data.remote.dto.RouteCreatedDto
-import com.example.smartgoprototype.data.remote.dto.UpdateRouteRequestDto
+import com.example.smartgoprototype.data.remote.dto.ToggleActiveRequestDto
+import com.example.smartgoprototype.data.remote.dto.UpdateScheduleRequestDto
 import com.example.smartgoprototype.domain.model.ForecastDay
 import com.example.smartgoprototype.domain.model.ForecastRecommendation
 import com.example.smartgoprototype.domain.model.ForecastStatus
@@ -136,18 +138,47 @@ class RouteRepositoryImpl @Inject constructor(
             )
         }
 
-        val request = UpdateRouteRequestDto(
-            routeId = routeId,
-            title = title?.trim(),
-            travelMode = travelMode?.name,
-            userActive = userActive,
-            arriveBy = arriveByMinutes?.toArriveByHHmm(),
-            timezone = timezone,
-            daysOfWeek = activeDays?.toBackendDays()
-        )
+        // Route each call to a purpose-specific DTO so that Moshi never serialises null
+        // fields into the JSON body. The backend checks `body.X !== undefined` to decide
+        // what to update; a JSON `null` is not `undefined` in JS and fails validation.
+        val apiCall: suspend () -> Unit = when {
+            userActive != null -> {
+                { executeApiCall { api.toggleActive(ToggleActiveRequestDto(routeId, userActive)) } }
+            }
+            title != null && arriveByMinutes != null && timezone != null && activeDays != null -> {
+                {
+                    executeApiCall {
+                        api.editRoute(
+                            EditRouteRequestDto(
+                                routeId = routeId,
+                                title = title.trim(),
+                                travelMode = requireNotNull(travelMode) { "travelMode required for editRoute" }.name,
+                                arriveBy = arriveByMinutes.toArriveByHHmm(),
+                                timezone = timezone,
+                                daysOfWeek = activeDays.toBackendDays()
+                            )
+                        )
+                    }
+                }
+            }
+            timezone != null && activeDays != null -> {
+                {
+                    executeApiCall {
+                        api.updateSchedule(
+                            UpdateScheduleRequestDto(
+                                routeId = routeId,
+                                timezone = timezone,
+                                daysOfWeek = activeDays.toBackendDays()
+                            )
+                        )
+                    }
+                }
+            }
+            else -> throw IllegalArgumentException("updateRoute called with no actionable fields")
+        }
 
         try {
-            executeApiCall { api.updateRoute(request) }
+            apiCall()
         } catch (e: Exception) {
             if (old != null) dao.upsert(old)
             throw e
