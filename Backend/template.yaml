@@ -148,10 +148,12 @@ Resources:
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
                   - dynamodb:PutItem
                   - dynamodb:UpdateItem
                   - dynamodb:DeleteItem
                   - dynamodb:Query
+                  - dynamodb:TransactWriteItems
                 Resource: !GetAtt UserRouteDB.Arn
               - Effect: Allow
                 Action:
