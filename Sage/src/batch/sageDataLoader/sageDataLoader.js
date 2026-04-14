@@ -7,11 +7,15 @@
 //    not subject to the rolling window -- present until manually removed).
 // 4. Writes the combined dataset to the model-specific Sage bucket prefix.
 //    The model script performs the internal train/val split -- no split done here.
-// 5. Ensures the model script tarball is in the Sage bucket; uploaded once per deploy.
+// 5. Ensures the model script tarball is in the Sage bucket; uploaded only when changed (MD5 delta check).
 // Returns: { bucketName, dataUri, codeUri, modelType, sagemakerProgram }
 
-const { s3GetBuffer, s3Put, s3Exists, s3ListKeys } = require('/opt/nodejs/utils');
-const fs = require('fs').promises;
+const { s3GetBuffer, s3Put, s3ListKeys } = require('/opt/nodejs/utils');
+const { S3Client, HeadObjectCommand } = require('@aws-sdk/client-s3');
+const crypto = require('crypto');
+const fs     = require('fs').promises;
+
+const s3 = new S3Client({});
 
 const SAGE_BUCKET  = process.env.SAGE_BUCKET;
 const DAGON_BUCKET = process.env.DAGON_BUCKET;
@@ -197,14 +201,25 @@ async function loadImports(config) {
 
 async function ensureCodeTarball(config) {
   // The model script tarball is built by the deploy-sage workflow and mounted at
-  // /opt/logic/ via LogicLayer. Only upload to S3 on first run after a deploy.
-  if (await s3Exists(SAGE_BUCKET, config.codeKey)) {
-    console.log(`Code tarball already present at ${config.codeKey} -- skipping upload`);
-    return `s3://${SAGE_BUCKET}/${config.codeKey}`;
+  // /opt/logic/ via LogicLayer. Compare the MD5 of the local tarball against the
+  // S3 ETag -- upload only when they differ, avoiding a redundant write on every run.
+  // S3 ETag for single-part uploads is the MD5 hex digest of the object content.
+  const tarBuf    = await fs.readFile(config.layerTarball);
+  const localMd5  = crypto.createHash('md5').update(tarBuf).digest('hex');
+
+  try {
+    const head = await s3.send(new HeadObjectCommand({ Bucket: SAGE_BUCKET, Key: config.codeKey }));
+    const s3Md5 = (head.ETag ?? '').replace(/"/g, '');
+    if (s3Md5 === localMd5) {
+      console.log(`Code tarball unchanged (md5=${localMd5}) -- skipping upload`);
+      return `s3://${SAGE_BUCKET}/${config.codeKey}`;
+    }
+    console.log(`Code tarball changed (local=${localMd5} s3=${s3Md5}) -- uploading`);
+  } catch (err) {
+    if (err.name !== 'NotFound' && err.$metadata?.httpStatusCode !== 404) throw err;
+    console.log(`Code tarball not found in S3 -- uploading`);
   }
 
-  console.log(`Code tarball not found at ${config.codeKey} -- uploading`);
-  const tarBuf = await fs.readFile(config.layerTarball);
   await s3Put(SAGE_BUCKET, config.codeKey, tarBuf, 'application/x-tar');
   console.log(`Code tarball uploaded to s3://${SAGE_BUCKET}/${config.codeKey}`);
   return `s3://${SAGE_BUCKET}/${config.codeKey}`;
