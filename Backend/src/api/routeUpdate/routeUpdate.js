@@ -57,7 +57,7 @@ exports.handler = async (event) => {
   if (!UUID_REGEX.test(routeId)) return response(400, { error: 'routeId must be a valid UUID' });
 
   let routeFieldsToUpdate = Object.keys(body).filter(k => ROUTE_FIELDS.includes(k));
-  const scheduleFieldsToUpdate = Object.keys(body).filter(k => SCHEDULE_FIELDS.includes(k));
+  let scheduleFieldsToUpdate = Object.keys(body).filter(k => SCHEDULE_FIELDS.includes(k));
 
   if (routeFieldsToUpdate.length === 0 && scheduleFieldsToUpdate.length === 0) {
     return response(400, {
@@ -66,6 +66,14 @@ exports.handler = async (event) => {
   }
 
   const needsRoutesApiCall = routeFieldsToUpdate.some(f => PATH_FIELDS.has(f));
+
+  // Inference fetch: needed when daysOfWeek changes without arriveBy or path fields.
+  // The stored schedule is read to distinguish a dashboard day-pause (subset removal)
+  // from a genuine reconfigure (days outside the stored set being added).
+  // EditRouteRequestDto always includes arriveBy, so that path is never treated as inference.
+  const needsInferenceFetch = body.daysOfWeek !== undefined
+    && body.arriveBy === undefined
+    && !routeFieldsToUpdate.some(f => FORECAST_AFFECTING_ROUTE_FIELDS.has(f));
 
   // ─── Validate client-supplied fields ─────────────────────────────────────────
   if (body.title !== undefined) {
@@ -130,11 +138,11 @@ exports.handler = async (event) => {
   }
 
   try {
-    // Verify route exists — when path fields change, batch-fetch ROUTE# and SCHEDULE# together
-    // to save a round-trip over the two separate GetItem calls that would otherwise be needed.
+    // Verify route exists — batch-fetch ROUTE# + SCHEDULE# when path fields change
+    // (needsRoutesApiCall) or a day-toggle inference read is required (needsInferenceFetch).
     let stored, storedSchedule = {};
 
-    if (needsRoutesApiCall) {
+    if (needsRoutesApiCall || needsInferenceFetch) {
       const { Responses } = await dynamoClient.send(new BatchGetItemCommand({
         RequestItems: {
           [TABLE]: {
@@ -158,6 +166,29 @@ exports.handler = async (event) => {
 
     if (!stored) {
       return response(404, { error: `No route found with routeId: ${routeId}` });
+    }
+
+    // ─── Day-toggle inference ─────────────────────────────────────────────────
+    // Runs only on the dashboard toggle path (daysOfWeek without arriveBy or path fields).
+    // Subset removal  → pause:     derive inactiveDays, leave daysOfWeek unchanged in DB.
+    // New days added  → reconfigure: update daysOfWeek, clear inactiveDays, invalidate forecast.
+    let isPauseResume = false;
+    if (needsInferenceFetch) {
+      const storedDays   = new Set(storedSchedule.daysOfWeek || []);
+      const newDays      = new Set(body.daysOfWeek);
+      const trulyNewDays = [...newDays].filter(d => !storedDays.has(d));
+
+      if (trulyNewDays.length > 0) {
+        // Days outside the stored set — genuine reconfigure
+        body.inactiveDays = [];
+        scheduleFieldsToUpdate.push('inactiveDays');
+      } else {
+        // Subset change — pause/resume: derive inactiveDays, do not touch daysOfWeek in DB
+        isPauseResume = true;
+        body.inactiveDays = [...storedDays].filter(d => !newDays.has(d));
+        scheduleFieldsToUpdate = scheduleFieldsToUpdate.filter(f => f !== 'daysOfWeek');
+        scheduleFieldsToUpdate.push('inactiveDays');
+      }
     }
 
     // ─── Routes API call (conditional) ─────────────────────────────────────────
@@ -257,12 +288,14 @@ exports.handler = async (event) => {
 
     await dynamoClient.send(new TransactWriteItemsCommand({ TransactItems: transactItems }));
 
-    // Invalidate FORECAST# when path-affecting route fields or any schedule fields change.
-    // title and userActive updates do NOT invalidate — they don't affect route geometry or timing.
-    // arriveBy/timezone/daysOfWeek affect when the forecast fires, so schedule changes always invalidate.
-    const shouldInvalidateForecast =
+    // Invalidate FORECAST# when path-affecting route fields or timing schedule fields change.
+    // title and userActive do NOT invalidate — they don't affect route geometry or timing.
+    // Pause/resume (isPauseResume) does NOT invalidate — the nightly batch skips inactive days
+    // and the stale day entry drops out of the next FORECAST# overwrite naturally.
+    const shouldInvalidateForecast = !isPauseResume && (
       routeFieldsToUpdate.some(f => FORECAST_AFFECTING_ROUTE_FIELDS.has(f)) ||
-      scheduleFieldsToUpdate.length > 0;
+      scheduleFieldsToUpdate.some(f => f !== 'inactiveDays')
+    );
 
     if (shouldInvalidateForecast) {
       try {

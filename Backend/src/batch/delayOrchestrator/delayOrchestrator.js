@@ -168,14 +168,21 @@ exports.handler = async (event) => {
       return;
     }
 
-    // timezone is required by delayWorker to convert arriveBy from local time to UTC per forecast date
-    const routeRefs = allSchedules.map(s => ({
-      userId: s.userId,
-      routeId: s.routeId,
-      arriveBy: s.arriveBy,
-      timezone: s.timezone,
-      daysOfWeek: s.daysOfWeek
-    }));
+    // timezone is required by delayWorker to convert arriveBy from local time to UTC per forecast date.
+    // inactiveDays are filtered out here so delayWorker processes only active days — inactive day entries
+    // will simply be absent from the next FORECAST# overwrite, clearing them without any explicit delete.
+    const routeRefs = allSchedules
+      .map(s => {
+        const inactive = new Set(s.inactiveDays || []);
+        return {
+          userId: s.userId,
+          routeId: s.routeId,
+          arriveBy: s.arriveBy,
+          timezone: s.timezone,
+          daysOfWeek: (s.daysOfWeek || []).filter(d => !inactive.has(d))
+        };
+      })
+      .filter(ref => ref.daysOfWeek.length > 0);
 
     const chunks = chunkArray(routeRefs, CHUNK_SIZE);
     console.log(`Enqueueing ${chunks.length} chunks of up to ${CHUNK_SIZE} routes each`);

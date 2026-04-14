@@ -219,6 +219,7 @@ exports.handler = async (event) => {
     // Stored here so delayWorker always uses the timezone active when the route was created/updated
     timezone: body.timezone,
     daysOfWeek: body.daysOfWeek,
+    inactiveDays: [],
     updatedAt: now
   };
 
@@ -275,6 +276,7 @@ exports.handler = async (event) => {
           arriveBy: body.arriveBy,
           timezone: body.timezone,
           daysOfWeek: body.daysOfWeek,
+          inactiveDays: [],
           updatedAt: now
         },
         forecastStatus: body.daysOfWeek.length > 0 ? 'pending' : 'empty',

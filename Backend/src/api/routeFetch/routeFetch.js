@@ -28,7 +28,7 @@ exports.handler = async (event) => {
         ExpressionAttributeValues: marshall({ ':uid': userId }),
         ExpressionAttributeNames: { '#timezone': 'timezone' },
         // Exclude `steps` — large TRANSIT stop data only needed by delayWorker, not this response
-        ProjectionExpression: 'userId, recordType, routeId, title, cityOrigin, cityDestination, cityIntermediates, userActive, origin, intermediates, destination, geometry, travelMode, staticDuration, trafficDuration, distanceMeters, createdAt, updatedAt, arriveBy, #timezone, daysOfWeek, days, generatedAt, email',
+        ProjectionExpression: 'userId, recordType, routeId, title, cityOrigin, cityDestination, cityIntermediates, userActive, origin, intermediates, destination, geometry, travelMode, staticDuration, trafficDuration, distanceMeters, createdAt, updatedAt, arriveBy, #timezone, daysOfWeek, inactiveDays, days, generatedAt, email',
         ExclusiveStartKey: lastEvaluatedKey
       }));
 
@@ -58,9 +58,11 @@ exports.handler = async (event) => {
 
       // forecastStatus communicates forecast state to Android:
       //   active  — forecast present and up to date
-      //   pending — route active with days selected but no forecast yet (new route or just updated)
-      //   empty   — no days selected, nothing to forecast
-      const hasDays = schedule && schedule.daysOfWeek && schedule.daysOfWeek.length > 0;
+      //   pending — route has active days but no forecast yet (new route or just updated)
+      //   empty   — no active days, nothing to forecast
+      const inactive = new Set(schedule?.inactiveDays ?? []);
+      const activeDays = (schedule?.daysOfWeek ?? []).filter(d => !inactive.has(d));
+      const hasDays = activeDays.length > 0;
       const forecastStatus = forecast ? 'active' : hasDays ? 'pending' : 'empty';
 
       return {
@@ -83,7 +85,7 @@ exports.handler = async (event) => {
         schedule: schedule ? {
           arriveBy: schedule.arriveBy,
           timezone: schedule.timezone,
-          daysOfWeek: schedule.daysOfWeek,
+          daysOfWeek: activeDays,
           updatedAt: schedule.updatedAt
         } : null,
         forecastStatus,
