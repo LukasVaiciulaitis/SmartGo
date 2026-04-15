@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.util.Log
+import com.example.smartgoprototype.notification.NotificationHelper
 import com.amplifyframework.AmplifyException
 import com.amplifyframework.auth.cognito.AWSCognitoAuthPlugin
 import com.amplifyframework.core.Amplify
@@ -22,6 +23,8 @@ class SmartGoApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+
+        NotificationHelper.createChannel(this)
 
         try {
             // Configure Amplify

@@ -1,5 +1,9 @@
 package com.example.smartgoprototype.ui.dashboard
 
+import android.Manifest
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.clickable
@@ -60,7 +64,8 @@ fun DashboardScreen(
     onToggleActive: (routeId: String) -> Unit,
     onReorder: (List<Route>) -> Unit,
     onToggleNotifications: () -> Unit,
-    onToggleGpsTracking: () -> Unit
+    onToggleGpsTracking: () -> Unit,
+    onOpenExactAlarmSettings: () -> Unit
 ) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -99,7 +104,8 @@ fun DashboardScreen(
                 notificationsEnabled = uiState.notificationsEnabled,
                 gpsTrackingEnabled = uiState.gpsTrackingEnabled,
                 onToggleNotifications = onToggleNotifications,
-                onToggleGpsTracking = onToggleGpsTracking
+                onToggleGpsTracking = onToggleGpsTracking,
+                onOpenExactAlarmSettings = onOpenExactAlarmSettings
             )
         }
     ) {
@@ -218,8 +224,16 @@ private fun SettingsDrawer(
     notificationsEnabled: Boolean,
     gpsTrackingEnabled: Boolean,
     onToggleNotifications: () -> Unit,
-    onToggleGpsTracking: () -> Unit
+    onToggleGpsTracking: () -> Unit,
+    onOpenExactAlarmSettings: () -> Unit
 ) {
+    // Runtime permission launcher for POST_NOTIFICATIONS (Android 13+)
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) onToggleNotifications()
+    }
+
     ModalDrawerSheet {
         Spacer(Modifier.height(16.dp))
         Text(
@@ -234,10 +248,37 @@ private fun SettingsDrawer(
             trailingContent = {
                 Switch(
                     checked = notificationsEnabled,
-                    onCheckedChange = { onToggleNotifications() }
+                    onCheckedChange = { enabling ->
+                        if (!enabling) {
+                            // Turning off — no permission needed
+                            onToggleNotifications()
+                        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            // Android 13+: request POST_NOTIFICATIONS at runtime
+                            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            // Below Android 13: permission granted at install time
+                            onToggleNotifications()
+                        }
+                    }
                 )
             }
         )
+        if (notificationsEnabled) {
+            ListItem(
+                headlineContent = {
+                    Text(
+                        text = "Exact alarm permission required for timely alerts.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                },
+                trailingContent = {
+                    TextButton(onClick = onOpenExactAlarmSettings) {
+                        Text("Open settings")
+                    }
+                }
+            )
+        }
         HorizontalDivider()
         ListItem(
             headlineContent = { Text("Opt in GPS data") },

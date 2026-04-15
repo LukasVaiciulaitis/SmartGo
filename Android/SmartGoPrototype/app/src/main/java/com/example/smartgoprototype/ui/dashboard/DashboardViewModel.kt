@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.smartgoprototype.domain.model.Route
 import com.example.smartgoprototype.domain.repository.AuthRepository
 import com.example.smartgoprototype.domain.repository.RouteRepository
+import com.example.smartgoprototype.notification.NotificationScheduler
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.DayOfWeek
 import javax.inject.Inject
@@ -17,7 +18,8 @@ import kotlinx.coroutines.launch
 @HiltViewModel
 class DashboardViewModel @Inject constructor(
     private val routeRepository: RouteRepository,
-    private val authRepository: AuthRepository
+    private val authRepository: AuthRepository,
+    private val notificationScheduler: NotificationScheduler
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState(isInitialLoading = true))
@@ -94,9 +96,13 @@ class DashboardViewModel @Inject constructor(
     }
 
     fun toggleNotifications() {
-        _uiState.value = _uiState.value.copy(
-            notificationsEnabled = !_uiState.value.notificationsEnabled
-        )
+        val enabling = !_uiState.value.notificationsEnabled
+        _uiState.value = _uiState.value.copy(notificationsEnabled = enabling)
+        if (enabling) {
+            notificationScheduler.scheduleAll(_uiState.value.routes)
+        } else {
+            notificationScheduler.cancelAll(_uiState.value.routes)
+        }
     }
 
     fun toggleGpsTracking() {
@@ -132,6 +138,9 @@ class DashboardViewModel @Inject constructor(
         viewModelScope.launch {
             routeRepository.observeRoutes().collect { routes ->
                 _uiState.value = _uiState.value.copy(routes = routes, isInitialLoading = false)
+                if (_uiState.value.notificationsEnabled) {
+                    notificationScheduler.scheduleAll(routes)
+                }
             }
         }
     }
