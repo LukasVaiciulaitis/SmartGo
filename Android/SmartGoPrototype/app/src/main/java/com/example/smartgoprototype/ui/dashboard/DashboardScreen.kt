@@ -234,6 +234,15 @@ private fun SettingsDrawer(
         if (granted) onToggleNotifications()
     }
 
+    // Runtime permission launcher for location (fine + coarse)
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val granted = results[Manifest.permission.ACCESS_FINE_LOCATION] == true
+                   || results[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        if (granted) onToggleGpsTracking()
+    }
+
     ModalDrawerSheet {
         Spacer(Modifier.height(16.dp))
         Text(
@@ -281,11 +290,22 @@ private fun SettingsDrawer(
         }
         HorizontalDivider()
         ListItem(
-            headlineContent = { Text("Opt in GPS data") },
+            headlineContent = { Text("Opt in GPS data for analytics") },
             trailingContent = {
                 Switch(
                     checked = gpsTrackingEnabled,
-                    onCheckedChange = { onToggleGpsTracking() }
+                    onCheckedChange = { enabling ->
+                        if (!enabling) {
+                            onToggleGpsTracking()
+                        } else {
+                            locationPermissionLauncher.launch(
+                                arrayOf(
+                                    Manifest.permission.ACCESS_FINE_LOCATION,
+                                    Manifest.permission.ACCESS_COARSE_LOCATION
+                                )
+                            )
+                        }
+                    }
                 )
             }
         )

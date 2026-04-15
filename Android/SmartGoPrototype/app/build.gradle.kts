@@ -87,6 +87,7 @@ dependencies {
     implementation(libs.amplify.core)
     implementation(libs.amplify.auth.cognito)
     implementation(libs.reorderable)
+    implementation(libs.androidx.datastore.preferences)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

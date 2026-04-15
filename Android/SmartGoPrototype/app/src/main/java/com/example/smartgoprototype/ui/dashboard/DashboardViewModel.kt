@@ -3,6 +3,7 @@ package com.example.smartgoprototype.ui.dashboard
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.smartgoprototype.domain.model.Route
+import com.example.smartgoprototype.data.preferences.UserPreferencesRepository
 import com.example.smartgoprototype.domain.repository.AuthRepository
 import com.example.smartgoprototype.domain.repository.RouteRepository
 import com.example.smartgoprototype.notification.NotificationScheduler
@@ -19,7 +20,8 @@ import kotlinx.coroutines.launch
 class DashboardViewModel @Inject constructor(
     private val routeRepository: RouteRepository,
     private val authRepository: AuthRepository,
-    private val notificationScheduler: NotificationScheduler
+    private val notificationScheduler: NotificationScheduler,
+    private val userPreferencesRepository: UserPreferencesRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState(isInitialLoading = true))
@@ -30,6 +32,7 @@ class DashboardViewModel @Inject constructor(
     val signOutEvent = _signOutEvent.receiveAsFlow()
 
     init {
+        collectPreferences()
         collectRoutes()
         refreshRoutes()
     }
@@ -98,6 +101,9 @@ class DashboardViewModel @Inject constructor(
     fun toggleNotifications() {
         val enabling = !_uiState.value.notificationsEnabled
         _uiState.value = _uiState.value.copy(notificationsEnabled = enabling)
+        viewModelScope.launch {
+            userPreferencesRepository.setNotificationsEnabled(enabling)
+        }
         if (enabling) {
             notificationScheduler.scheduleAll(_uiState.value.routes)
         } else {
@@ -106,9 +112,11 @@ class DashboardViewModel @Inject constructor(
     }
 
     fun toggleGpsTracking() {
-        _uiState.value = _uiState.value.copy(
-            gpsTrackingEnabled = !_uiState.value.gpsTrackingEnabled
-        )
+        val enabling = !_uiState.value.gpsTrackingEnabled
+        _uiState.value = _uiState.value.copy(gpsTrackingEnabled = enabling)
+        viewModelScope.launch {
+            userPreferencesRepository.setGpsTrackingEnabled(enabling)
+        }
     }
 
     fun toggleDay(routeId: String, day: DayOfWeek) {
@@ -134,6 +142,17 @@ class DashboardViewModel @Inject constructor(
      * Continuously collects the Room Flow. Any cache write (refresh, add, update, delete)
      * automatically propagates here and updates the UI without further intervention.
      */
+    private fun collectPreferences() {
+        viewModelScope.launch {
+            userPreferencesRepository.userPreferences.collect { prefs ->
+                _uiState.value = _uiState.value.copy(
+                    notificationsEnabled = prefs.notificationsEnabled,
+                    gpsTrackingEnabled   = prefs.gpsTrackingEnabled
+                )
+            }
+        }
+    }
+
     private fun collectRoutes() {
         viewModelScope.launch {
             routeRepository.observeRoutes().collect { routes ->

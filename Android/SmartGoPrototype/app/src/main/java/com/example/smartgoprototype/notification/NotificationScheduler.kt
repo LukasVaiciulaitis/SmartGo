@@ -20,7 +20,7 @@ class NotificationScheduler @Inject constructor(
     private val alarmManager = context.getSystemService(AlarmManager::class.java)
 
     companion object {
-        private const val NOTIFY_BEFORE_MS = (24 * 60 + 21) * 60 * 1000L
+        private const val NOTIFY_BEFORE_MS = 5 * 60 * 1000L
 
         private val DAY_KEY_MAP = mapOf(
             DayOfWeek.MONDAY    to "MON",
