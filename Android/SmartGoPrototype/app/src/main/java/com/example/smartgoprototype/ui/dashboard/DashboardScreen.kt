@@ -9,6 +9,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -33,9 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.example.smartgoprototype.domain.model.ForecastStatus
 import com.example.smartgoprototype.domain.model.Route
@@ -78,7 +77,6 @@ fun DashboardScreen(
         targetValue = if (forecastExpanded) 180f else 0f,
         label = "forecastChevron"
     )
-    var forecastSectionHeight by remember { mutableStateOf(0) }
 
     // Delete confirmation dialog
     uiState.pendingDeleteRoute?.let { route ->
@@ -157,45 +155,46 @@ fun DashboardScreen(
                     }
                 }
                 else -> {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        Column(modifier = Modifier.onSizeChanged { forecastSectionHeight = it.height }) {
-                            NextDepartureHeader(routes = uiState.routes)
-                            Spacer(Modifier.height(8.dp))
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { forecastExpanded = !forecastExpanded }
-                                    .padding(vertical = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Weekly Forecast",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                Icon(
-                                    imageVector = Icons.Default.KeyboardArrowDown,
-                                    contentDescription = if (forecastExpanded) "Collapse forecast" else "Expand forecast",
-                                    modifier = Modifier.rotate(chevronRotation)
-                                )
-                            }
-                            AnimatedVisibility(visible = forecastExpanded) {
-                                ForecastSheet(routes = uiState.routes)
+                    RoutesList(
+                        routes = uiState.routes,
+                        onAddRouteClick = onAddRouteClick,
+                        onEditRoute = onEditRoute,
+                        onDeleteRoute = onDeleteRouteRequest,
+                        onToggleDay = onToggleDay,
+                        onToggleActive = onToggleActive,
+                        onReorder = onReorder,
+                        modifier = Modifier.fillMaxSize(),
+                        headerContent = {
+                            item(key = "forecast_header") {
+                                Column(modifier = Modifier.padding(bottom = 6.dp)) {
+                                    NextDepartureHeader(routes = uiState.routes)
+                                    Spacer(Modifier.height(8.dp))
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { forecastExpanded = !forecastExpanded }
+                                            .padding(vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Weekly Forecast",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Icon(
+                                            imageVector = Icons.Default.KeyboardArrowDown,
+                                            contentDescription = if (forecastExpanded) "Collapse forecast" else "Expand forecast",
+                                            modifier = Modifier.rotate(chevronRotation)
+                                        )
+                                    }
+                                    AnimatedVisibility(visible = forecastExpanded) {
+                                        ForecastSheet(routes = uiState.routes)
+                                    }
+                                }
                             }
                         }
-                        Spacer(Modifier.height(6.dp))
-                        RoutesList(
-                            routes = uiState.routes,
-                            onAddRouteClick = onAddRouteClick,
-                            onEditRoute = onEditRoute,
-                            onDeleteRoute = onDeleteRouteRequest,
-                            onToggleDay = onToggleDay,
-                            onToggleActive = onToggleActive,
-                            onReorder = onReorder,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
+                    )
                 }
             }
 
@@ -210,9 +209,7 @@ fun DashboardScreen(
             PullRefreshIndicator(
                 refreshing = uiState.isRefreshing,
                 state = pullRefreshState,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .offset { IntOffset(0, forecastSectionHeight) }
+                modifier = Modifier.align(Alignment.TopCenter)
             )
         }
     }
@@ -259,7 +256,7 @@ private fun SettingsDrawer(
                     checked = notificationsEnabled,
                     onCheckedChange = { enabling ->
                         if (!enabling) {
-                            // Turning off — no permission needed
+                            // Turning off, no permission needed
                             onToggleNotifications()
                         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                             // Android 13+: request POST_NOTIFICATIONS at runtime
@@ -442,6 +439,7 @@ private fun RoutesList(
     onToggleActive: (routeId: String) -> Unit,
     onReorder: (List<Route>) -> Unit,
     modifier: Modifier = Modifier,
+    headerContent: LazyListScope.() -> Unit = {}
 ) {
     // orderedIds tracks drag order. Only reset when the set of IDs changes (add/delete).
     var orderedIds by remember { mutableStateOf(routes.map { it.id }) }
@@ -472,6 +470,7 @@ private fun RoutesList(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        headerContent()
         items(displayRoutes, key = { it.id }) { route ->
             ReorderableItem(reorderableState, key = route.id) { isDragging ->
                 val haptic = LocalHapticFeedback.current

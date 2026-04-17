@@ -139,8 +139,7 @@ class RouteRepositoryImpl @Inject constructor(
         }
 
         // Route each call to a purpose-specific DTO so that Moshi never serialises null
-        // fields into the JSON body. The backend checks `body.X !== undefined` to decide
-        // what to update; a JSON `null` is not `undefined` in JS and fails validation.
+        // fields into the JSON body.
         val apiCall: suspend () -> Unit = when {
             userActive != null -> {
                 { executeApiCall { api.toggleActive(ToggleActiveRequestDto(routeId, userActive)) } }

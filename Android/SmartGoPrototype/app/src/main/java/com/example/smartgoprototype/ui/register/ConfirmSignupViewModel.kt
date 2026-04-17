@@ -27,9 +27,6 @@ class ConfirmSignUpViewModel @Inject constructor(
     var uiState by mutableStateOf(ConfirmSignUpUiState())
         private set
 
-    /**
-     * Username is passed through navigation; this helper ensures it survives recomposition.
-     */
     fun initUsername(username: String) {
         if (uiState.username.isBlank()) {
             uiState = uiState.copy(username = username.trim().lowercase())
@@ -67,7 +64,7 @@ class ConfirmSignUpViewModel @Inject constructor(
                 return@launch
             }
 
-            // Email verified — now sign the user in so the Dashboard has a valid token.
+            // Verified - sign the user in so the dashboard has a valid token on first load.
             val email = pendingCredentials.email
             val password = pendingCredentials.password
             pendingCredentials.clear()
@@ -78,8 +75,7 @@ class ConfirmSignUpViewModel @Inject constructor(
                     uiState.copy(isLoading = false, isSuccess = true, errorMessage = null)
                 },
                 onFailure = {
-                    // Confirmation succeeded but auto-login failed — send the user to
-                    // the login screen rather than leaving them stuck.
+                    // Confirmation succeeded but auto-login failed, redirect to login.
                     uiState.copy(isLoading = false, shouldFallBackToLogin = true)
                 }
             )

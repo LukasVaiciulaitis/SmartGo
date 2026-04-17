@@ -47,7 +47,7 @@ abstract class RouteDao {
     @Query("SELECT COALESCE(MAX(sortOrder), -1) + 1 FROM routes")
     abstract suspend fun nextSortOrder(): Int
 
-    // Targeted mutations used for optimistic updates — cheaper than a full upsert.
+    // Targeted mutations used for optimistic updates, cheaper than a full upsert.
     @Query("UPDATE routes SET userActive = :active WHERE id = :id")
     abstract suspend fun setUserActive(id: String, active: Boolean)
 

@@ -169,7 +169,7 @@ fun SmartGoAppNavHost(
 /**
  * SplashRoute: checks existing auth session and routes to Dashboard or Login accordingly.
  *
- * Delegates to [SplashViewModel], which calls [SessionProvider.getIdToken]. This serves
+ * Delegates to SplashViewModel, which calls SessionProvider.getIdToken. This serves
  * two purposes: determining sign-in state, and warming the token cache before the
  * Dashboard fires its first batch of API requests.
  */

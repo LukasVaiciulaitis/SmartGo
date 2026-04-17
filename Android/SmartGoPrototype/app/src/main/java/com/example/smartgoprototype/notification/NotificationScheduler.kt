@@ -33,10 +33,7 @@ class NotificationScheduler @Inject constructor(
         )
     }
 
-    /**
-     * Cancels any existing alarms for the given routes, then schedules fresh alarms
-     * for all upcoming active-day departures that are more than 5 minutes away.
-     */
+    // Replaces any existing alarms with fresh ones based on current forecast data.
     fun scheduleAll(routes: List<Route>) {
         if (!canScheduleExact()) return
         cancelAll(routes)

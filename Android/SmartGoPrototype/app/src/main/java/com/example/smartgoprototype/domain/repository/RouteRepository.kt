@@ -11,7 +11,7 @@ interface RouteRepository {
 
     /**
      * Observes the local Room cache. Emits a new list whenever the cache changes.
-     * Room is the single source of truth — the UI never reads directly from the network.
+     * Room is the single source of truth; the UI never reads directly from the network.
      */
     fun observeRoutes(): Flow<List<Route>>
 

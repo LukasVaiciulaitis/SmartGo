@@ -39,6 +39,7 @@ class DashboardViewModel @Inject constructor(
 
     fun refresh() = refreshRoutes()
 
+
     fun signOut() {
         viewModelScope.launch {
             authRepository.signOut().onSuccess {

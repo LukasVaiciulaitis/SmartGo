@@ -13,8 +13,8 @@ import javax.inject.Inject
 
 /**
  * Reschedules departure alarms after a device reboot.
- * AlarmManager alarms do not survive reboots — this receiver restores them
- * by reading the cached routes from Room and re-scheduling via NotificationScheduler.
+ * AlarmManager alarms don't survive reboots, so this reads the cached routes
+ * from Room and reschedules via NotificationScheduler.
  */
 @AndroidEntryPoint
 class BootReceiver : BroadcastReceiver() {

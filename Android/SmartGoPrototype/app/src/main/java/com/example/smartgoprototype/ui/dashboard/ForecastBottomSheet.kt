@@ -232,7 +232,7 @@ private fun ForecastLineChart(
                 )
             )
 
-            // Dots — filled with route color, hollow center in surface color
+            // Dots - filled with route color, hollow center in surface color
             points.forEachIndexed { dayIndex, value ->
                 if (value != null) {
                     val x = chartLeft + dayIndex * xStep

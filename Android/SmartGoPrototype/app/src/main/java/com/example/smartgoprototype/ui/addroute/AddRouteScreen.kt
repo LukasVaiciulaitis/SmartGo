@@ -177,7 +177,7 @@ private fun PlaceField(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
 
-    // Launch only on explicit tap — not on focus changes caused by returning from the
+    // Launch only on explicit tap, not on focus changes caused by returning from the
     // Places activity. onFocusChanged would re-fire when the screen regains focus after
     // the activity result, immediately re-opening the picker before the user sees the form.
     LaunchedEffect(interactionSource) {

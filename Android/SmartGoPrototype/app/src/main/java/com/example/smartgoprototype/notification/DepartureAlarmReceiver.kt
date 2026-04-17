@@ -59,7 +59,7 @@ class DepartureAlarmReceiver : BroadcastReceiver() {
 
         val notification = NotificationCompat.Builder(context, NotificationHelper.CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("Time to leave — $routeTitle")
+            .setContentTitle("Time to leave: $routeTitle")
             .setContentText(bodyText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bodyText))
             .setContentIntent(tapPendingIntent)

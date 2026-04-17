@@ -2,7 +2,7 @@ package com.example.smartgoprototype.data.remote.dto
 
 import com.squareup.moshi.Json
 
-// Used by EditRouteViewModel — updates title, travel mode, and schedule together.
+// Used by EditRouteViewModel - updates title, travel mode, and schedule together.
 // No userActive field: the edit form never changes active state.
 data class EditRouteRequestDto(
     @field:Json(name = "routeId") val routeId: String,
@@ -13,13 +13,13 @@ data class EditRouteRequestDto(
     @field:Json(name = "daysOfWeek") val daysOfWeek: List<String>
 )
 
-// Used by DashboardViewModel.toggleRouteActive — only flips the active flag.
+// Used by DashboardViewModel.toggleRouteActive - only flips the active flag.
 data class ToggleActiveRequestDto(
     @field:Json(name = "routeId") val routeId: String,
     @field:Json(name = "userActive") val userActive: Boolean
 )
 
-// Used by DashboardViewModel.toggleDay — only updates the schedule days (and timezone).
+// Used by DashboardViewModel.toggleDay - only updates the schedule days (and timezone).
 data class UpdateScheduleRequestDto(
     @field:Json(name = "routeId") val routeId: String,
     @field:Json(name = "timezone") val timezone: String,
