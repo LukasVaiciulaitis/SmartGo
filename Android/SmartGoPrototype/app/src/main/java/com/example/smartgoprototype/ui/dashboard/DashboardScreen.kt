@@ -458,8 +458,11 @@ private fun RoutesList(
 
     val lazyListState = rememberLazyListState()
     val reorderableState = rememberReorderableLazyListState(lazyListState) { from, to ->
+        val fromIdx = orderedIds.indexOf(from.key)
+        val toIdx = orderedIds.indexOf(to.key)
+        if (fromIdx == -1 || toIdx == -1) return@rememberReorderableLazyListState
         val newIds = orderedIds.toMutableList().apply {
-            add(to.index, removeAt(from.index))
+            add(toIdx, removeAt(fromIdx))
         }
         orderedIds = newIds
         onReorder(newIds.mapNotNull { routeMap[it] })
