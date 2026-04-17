@@ -17,6 +17,8 @@ import com.example.smartgoprototype.data.remote.dto.GoogleAddressComponentDto
 import com.example.smartgoprototype.data.remote.dto.IntermediatePlace
 import com.example.smartgoprototype.data.remote.dto.RouteCreatedDto
 import com.example.smartgoprototype.data.remote.dto.ToggleActiveRequestDto
+import com.example.smartgoprototype.data.remote.dto.UpdateRouteMetaDto
+import com.example.smartgoprototype.data.remote.dto.UpdateRouteTitleDto
 import com.example.smartgoprototype.data.remote.dto.UpdateScheduleRequestDto
 import com.example.smartgoprototype.domain.model.ForecastDay
 import com.example.smartgoprototype.domain.model.ForecastRecommendation
@@ -159,6 +161,15 @@ class RouteRepositoryImpl @Inject constructor(
                         )
                     }
                 }
+            }
+            title != null && travelMode != null -> {
+                // travelMode changed but schedule unchanged — omit schedule fields.
+                // travelMode is forecast-affecting so the backend will still invalidate correctly.
+                { executeApiCall { api.updateRouteMeta(UpdateRouteMetaDto(routeId, title.trim(), travelMode.name)) } }
+            }
+            title != null -> {
+                // Only title changed — send nothing forecast-affecting, no invalidation.
+                { executeApiCall { api.updateRouteTitle(UpdateRouteTitleDto(routeId, title.trim())) } }
             }
             timezone != null && activeDays != null -> {
                 {

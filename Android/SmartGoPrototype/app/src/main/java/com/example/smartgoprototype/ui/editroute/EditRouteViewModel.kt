@@ -25,6 +25,11 @@ class EditRouteViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(EditRouteUiState())
     val uiState: StateFlow<EditRouteUiState> = _uiState
 
+    // Snapshots taken at load time — used to detect what actually changed before sending to the backend.
+    private var originalTravelMode: TravelMode? = null
+    private var originalArriveBy: LocalTime? = null
+    private var originalActiveDays: Set<DayOfWeek>? = null
+
     init { loadRoute() }
 
     private fun loadRoute() {
@@ -32,13 +37,17 @@ class EditRouteViewModel @Inject constructor(
             runCatching { routeRepository.getRouteById(routeId) }
                 .onSuccess { route ->
                     if (route != null) {
+                        val arriveBy = LocalTime.of(route.schedule.arriveByMinutes / 60, route.schedule.arriveByMinutes % 60)
+                        originalTravelMode = route.travelMode
+                        originalArriveBy = arriveBy
+                        originalActiveDays = route.schedule.activeDays
                         _uiState.value = EditRouteUiState(
                             routeId = route.id,
                             title = route.title,
                             originLabel = route.origin.label,
                             destinationLabel = route.destination.label,
                             travelMode = route.travelMode,
-                            arriveBy = LocalTime.of(route.schedule.arriveByMinutes / 60, route.schedule.arriveByMinutes % 60),
+                            arriveBy = arriveBy,
                             activeDays = route.schedule.activeDays,
                             isLoading = false
                         )
@@ -87,15 +96,18 @@ class EditRouteViewModel @Inject constructor(
 
         _uiState.value = state.copy(isSaving = true, errorMessage = null)
 
+        val travelModeChanged = state.travelMode != originalTravelMode
+        val scheduleChanged = state.arriveBy != originalArriveBy || state.activeDays != originalActiveDays
+
         viewModelScope.launch {
             runCatching {
                 routeRepository.updateRoute(
                     routeId = state.routeId,
                     title = state.title.trim(),
-                    travelMode = state.travelMode,
-                    arriveByMinutes = state.arriveBy.hour * 60 + state.arriveBy.minute,
-                    timezone = ZoneId.systemDefault().id,
-                    activeDays = state.activeDays
+                    travelMode = if (travelModeChanged || scheduleChanged) state.travelMode else null,
+                    arriveByMinutes = if (scheduleChanged) state.arriveBy.hour * 60 + state.arriveBy.minute else null,
+                    timezone = if (scheduleChanged) ZoneId.systemDefault().id else null,
+                    activeDays = if (scheduleChanged) state.activeDays else null
                 )
             }.onSuccess {
                 _uiState.value = _uiState.value.copy(isSaving = false)

@@ -6,6 +6,8 @@ import com.example.smartgoprototype.data.remote.dto.DeleteRouteRequestDto
 import com.example.smartgoprototype.data.remote.dto.DeleteRouteResponseDto
 import com.example.smartgoprototype.data.remote.dto.FetchRoutesResponseDto
 import com.example.smartgoprototype.data.remote.dto.EditRouteRequestDto
+import com.example.smartgoprototype.data.remote.dto.UpdateRouteMetaDto
+import com.example.smartgoprototype.data.remote.dto.UpdateRouteTitleDto
 import com.example.smartgoprototype.data.remote.dto.ToggleActiveRequestDto
 import com.example.smartgoprototype.data.remote.dto.UpdateRouteResponseDto
 import com.example.smartgoprototype.data.remote.dto.UpdateScheduleRequestDto
@@ -42,6 +44,16 @@ interface RoutesApi {
     @PUT("routes/update")
     suspend fun editRoute(
         @Body request: EditRouteRequestDto
+    ): UpdateRouteResponseDto
+
+    @PUT("routes/update")
+    suspend fun updateRouteTitle(
+        @Body request: UpdateRouteTitleDto
+    ): UpdateRouteResponseDto
+
+    @PUT("routes/update")
+    suspend fun updateRouteMeta(
+        @Body request: UpdateRouteMetaDto
     ): UpdateRouteResponseDto
 
     @PUT("routes/update")

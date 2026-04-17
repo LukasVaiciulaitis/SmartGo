@@ -13,6 +13,21 @@ data class EditRouteRequestDto(
     @field:Json(name = "daysOfWeek") val daysOfWeek: List<String>
 )
 
+// Used when title changed but travelMode and schedule did not — only title is sent so the
+// backend sees no forecast-affecting fields and skips forecast invalidation.
+data class UpdateRouteTitleDto(
+    @field:Json(name = "routeId") val routeId: String,
+    @field:Json(name = "title") val title: String
+)
+
+// Used when travelMode changed but schedule did not — omits schedule fields so the backend
+// does not see arriveBy/timezone/daysOfWeek (travelMode correctly triggers invalidation).
+data class UpdateRouteMetaDto(
+    @field:Json(name = "routeId") val routeId: String,
+    @field:Json(name = "title") val title: String,
+    @field:Json(name = "travelMode") val travelMode: String
+)
+
 // Used by DashboardViewModel.toggleRouteActive - only flips the active flag.
 data class ToggleActiveRequestDto(
     @field:Json(name = "routeId") val routeId: String,
