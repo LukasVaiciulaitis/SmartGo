@@ -1,0 +1,105 @@
+name: Teardown All Stacks
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "teardown" to confirm permanent destruction of all infrastructure'
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate confirmation input
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "teardown" ]; then
+            echo "❌ Confirmation input did not match 'teardown'. Aborting."
+            exit 1
+          fi
+          echo "✅ Confirmation accepted. Proceeding with teardown."
+
+  teardown-sage:
+    needs: confirm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - uses: aws-actions/setup-sam@v2
+
+      - name: Delete smartgo-sage-stack
+        run: |
+          sam delete \
+            --stack-name smartgo-sage-stack \
+            --region eu-west-1 \
+            --no-prompts
+        working-directory: Sage
+
+  teardown-backend:
+    needs: confirm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - uses: aws-actions/setup-sam@v2
+
+      - name: Delete route-stack
+        run: |
+          sam delete \
+            --stack-name route-stack \
+            --region eu-west-1 \
+            --no-prompts
+        working-directory: Backend
+
+  teardown-dagon:
+    needs: [teardown-sage, teardown-backend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-2
+
+      - uses: aws-actions/setup-sam@v2
+
+      - name: Resolve Dagon bucket name
+        run: |
+          DAGON_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name commuter-data-stack \
+            --region eu-west-2 \
+            --query 'Stacks[0].Outputs[?OutputKey==`dagonDataBucketName`].OutputValue' \
+            --output text)
+          echo "DAGON_BUCKET=$DAGON_BUCKET" >> $GITHUB_ENV
+
+      - name: Empty Dagon S3 bucket
+        run: |
+          if [ -n "$DAGON_BUCKET" ]; then
+            echo "Emptying s3://$DAGON_BUCKET ..."
+            aws s3 rm s3://$DAGON_BUCKET --recursive
+          else
+            echo "No bucket found — skipping empty step."
+          fi
+
+      - name: Delete commuter-data-stack
+        run: |
+          sam delete \
+            --stack-name commuter-data-stack \
+            --region eu-west-2 \
+            --no-prompts
+        working-directory: Dagon
